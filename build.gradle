@@ -1,0 +1,21 @@
+plugins {
+    id 'net.fabricmc.fabric-loom' version "${loom_version}" apply false
+}
+
+subprojects {
+    group = project.maven_group
+    version = "${project.liskov_version}+mc${project.minecraft_version}"
+
+    repositories {
+        mavenCentral()
+        maven {
+            name = 'Fabric'
+            url = 'https://maven.fabricmc.net/'
+        }
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+        options.release = 25
+    }
+}

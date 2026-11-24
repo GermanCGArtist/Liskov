@@ -1,0 +1,72 @@
+plugins {
+    id 'net.fabricmc.fabric-loom'
+    id 'maven-publish'
+}
+
+base {
+    archivesName = 'liskov'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_25
+    targetCompatibility = JavaVersion.VERSION_25
+    withSourcesJar()
+}
+
+configurations {
+    bundle
+    implementation.extendsFrom(bundle)
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+    compileOnly "org.lwjgl:lwjgl-sdl:3.4.3"
+
+    api project(':liskov-core')
+    api project(':liskov-net')
+    include project(':liskov-core')
+    include project(':liskov-net')
+
+    bundle("io.github.spair:imgui-java-binding:${project.imgui_version}")
+    bundle("io.github.spair:imgui-java-lwjgl3:${project.imgui_version}") {
+        exclude group: 'org.lwjgl'
+    }
+    bundle("io.github.spair:imgui-java-natives-windows:${project.imgui_version}")
+    bundle("io.github.spair:imgui-java-natives-linux:${project.imgui_version}")
+    bundle("io.github.spair:imgui-java-natives-macos:${project.imgui_version}")
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+processResources {
+    def props = [version: project.version, minecraft_dep: project.minecraft_dep]
+    inputs.properties props
+    filesMatching('fabric.mod.json') {
+        expand props
+    }
+}
+
+jar {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from {
+        configurations.bundle.collect { it.isDirectory() ? it : zipTree(it) }
+    } {
+        exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'META-INF/MANIFEST.MF', 'META-INF/versions/**'
+    }
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+            artifactId = 'liskov'
+        }
+    }
+}

@@ -1,0 +1,14 @@
+.gradle/
+build/
+**/build/
+run/
+tmp/
+logs/
+.idea/
+*.iml
+.vscode/
+libs/
+tools/
+install.bat
+.DS_Store
+Thumbs.db

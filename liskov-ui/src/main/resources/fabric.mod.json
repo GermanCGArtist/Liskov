@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "liskov",
+  "version": "${version}",
+  "name": "Liskov",
+  "description": "Unified Minecraft Drives Filesystem, Hidden .liskov-vcs/ Version Control, Server Sync & ACLs, 3D Schematic Previews, and Shared ModsUndBots ImGui Host.",
+  "authors": ["GermanCGArtist"],
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": ["dev.liskov.net.LiskovNetMod"],
+    "client": ["dev.liskov.ui.LiskovClientMod"]
+  },
+  "mixins": ["liskov.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.20.1",
+    "fabric-api": "*",
+    "minecraft": "${minecraft_dep}",
+    "java": ">=25"
+  }
+}

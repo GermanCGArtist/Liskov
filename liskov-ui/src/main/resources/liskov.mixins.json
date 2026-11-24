@@ -1,0 +1,16 @@
+{
+  "required": false,
+  "minVersion": "0.8",
+  "package": "dev.liskov.ui.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "plugin": "dev.liskov.ui.mixin.LiskovMixinPlugin",
+  "client": [
+    "KeyboardHandlerMixin",
+    "MouseHandlerMixin",
+    "GuiRendererMixin",
+    "LitematicaRedirectMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}
