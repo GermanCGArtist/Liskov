@@ -98,7 +98,7 @@ LiskovUiHost.captureCursor(false);
 In `dev.vitruvius.editor.EditorInputLayer`:
 - Update `implements dev.cg.uihost.UiLayer` -> `implements dev.liskov.ui.host.UiLayer`.
 - **Important `UiLayer` behavior difference:** In `Liskov` `HostCore.onKey`, returning `wantsKey() == true` dispatches `onKey(...)` to **all** visible layers without short-circuiting. Inside `EditorInputLayer.onKey(...)`, guard against `FilePickerModal.isOpen() || MubWidgets.CommandPalette.isOpen() || LiskovExplorer.get().visible()` until `HostCore` implements consumption short-circuiting (`P0` in [Gaps & Follow-ups](file:///f:/workflow/Liskov/docs/GAPS_AND_FOLLOWUPS.md)).
-- **Mouse-grab mixin (`MouseHandlerGrabMixin`):** `dev.vitruvius.editor.mixin.MouseHandlerGrabMixin` prevents Minecraft from re-grabbing the cursor while `EditorMode.isActive()` is true. Liskov `0.1.0` does **not** yet hook `MouseHandler.grabMouse()` / `turnPlayer()` (`P0`), so **keep `MouseHandlerGrabMixin`** in `vitruvius-editor.mixins.json` until Liskov `v0.1.1` adds `UiLayer.blocksMouseGrab()`.
+- **Mouse-grab mixin (`MouseHandlerGrabMixin`):** `dev.vitruvius.editor.mixin.MouseHandlerGrabMixin` prevents Minecraft from re-grabbing the cursor while `EditorMode.isActive()` is true. Since Liskov **`0.2.0+mc26.3`**, `UiLayer.blocksMouseGrab()` and `MouseHandlerMixin` (`grabMouse` + `turnPlayer`) handle this centrally — override `blocksMouseGrab() { return EditorMode.isActive(); }` on `EditorInputLayer` and drop `MouseHandlerGrabMixin`.
 
 ### Theme & Texture Lookup (`Ui`, `EditorChrome`, `BlockIcons`)
 
@@ -141,41 +141,36 @@ Liskov registers two namespaces Vitruvius cares about by default:
 
 ### Auto-Commit on Save (`VcsStore`) & Live Reload (`LiskovReloadBus`)
 
-Replace Vitruvius's `dev.vitruvius.editor.sync.history.CommitGraph` / `Retention` on project save with `VcsStore` snapshots, and subscribe `ProjectManager` to `LiskovReloadBus`:
+Replace Vitruvius's `dev.vitruvius.editor.sync.history.CommitGraph` / `Retention` on project save with `VcsStore` snapshots (which automatically deduplicate identical autosaves, auto-prune old autosaves keeping milestones & branch tips via `DEFAULT_AUTO_MAX_AUTOSAVES = 25` / `DEFAULT_AUTO_MAX_AGE_DAYS = 30`, and run `gcUnreferencedObjects()`), and subscribe `ProjectManager` to `LiskovReloadBus`:
 
 ```java
-// On ProjectManager.save(ProjectNode project)
+// On ProjectManager.save(ProjectNode project) — available since Liskov 0.2.0+mc26.3
 if (LiskovFs.isInitialized()) {
     Path projDir = /* resolved project folder */;
     Path projFile = projDir.resolve("project.vproj");
     String relPath = LiskovFs.get().schematicsDir().relativize(projFile).toString().replace('\\', '/');
 
-    Map<String, byte[]> bundle = new LinkedHashMap<>();
-    bundle.put("project.vproj", Files.readAllBytes(projFile));
-    Path filesDir = projDir.resolve("files");
-    if (Files.isDirectory(filesDir)) {
-        try (var stream = Files.walk(filesDir)) {
-            for (Path p : stream.filter(Files::isRegularFile).toList()) {
-                String key = "files/" + filesDir.relativize(p).toString().replace('\\', '/');
-                bundle.put(key, Files.readAllBytes(p));
-            }
-        }
-    }
-
-    VcsStore vcs = new VcsStore(LiskovFs.get().vcsRootDir());
     var mc = Minecraft.getInstance();
     String uuid = mc.player != null ? mc.player.getStringUUID() : "";
     String name = mc.player != null ? mc.player.getName().getString() : "Local";
-    VcsCommit commit = vcs.snapshot(
-            activeDriveId,              // "local" or LiskovSyncClient.get().activeServerId()
-            VcsStore.repoIdFor(relPath),
-            uuid, name,
-            autoSave ? "Autosave" : "Save project",
-            false, autoSave, bundle
-    );
 
-    if (!LiskovDrives.LOCAL_DRIVE_ID.equals(activeDriveId)) {
-        LiskovSyncClient.get().pushCommit("shared", relPath, FileTypeRegistry.VPROJ.id(), commit, bundle);
+    VcsStore vcs = new VcsStore(LiskovFs.get().vcsRootDir());
+    vcs.setAutoRetention(25, 30, 15); // optional: default is already 25 autosaves, 30d, keep >= 15
+
+    if (LiskovDrives.LOCAL_DRIVE_ID.equals(activeDriveId)) {
+        vcs.snapshotDirectory(
+                LiskovDrives.LOCAL_DRIVE_ID,
+                VcsStore.repoIdFor(relPath),
+                projDir, uuid, name,
+                autoSave ? "Autosave" : "Save project",
+                false, autoSave
+        );
+    } else {
+        // Snapshots locally (with auto-dedup/prune) AND uploads deltas to the active server drive:
+        LiskovSyncClient.get().publishPath(
+                null, projDir, relPath, FileTypeRegistry.VPROJ.id(),
+                uuid, name, autoSave ? "Autosave" : "Save project", autoSave
+        );
     }
 }
 ```
@@ -202,11 +197,11 @@ LiskovReloadBus.subscribe(new LiskovReloadBus.Listener() {
 
 ## 5. Shifting Sharing, Access & Locking to Liskov
 
-Today `dev.vitruvius.editor.sync.SyncService` serializes projects as Syncmatica placements (`[LA2] <project>` + `SyncManifest` + `SyncPlan`). Moving onto Liskov eliminates Syncmatica's 1x1x1 dummy placement hack:
+Today `dev.vitruvius.editor.sync.SyncService` serializes projects as Syncmatica placements (`[LA2] <project>` + `SyncManifest` + `SyncPlan`). Moving onto Liskov `0.2.0+mc26.3` eliminates Syncmatica's 1x1x1 dummy placement hack:
 
-- **Transport:** Replace `SyncService` push/poll with `LiskovSyncClient.get().pushCommit(...)` and `LiskovSyncClient.get().requestDownload(...)` over `liskov:sync`.
+- **Transport (`0.2.0+mc26.3` Ready):** Replace `SyncService` push/poll with `LiskovSyncClient.get().publishPath(...)` / `pushCommit(...)`, `requestDownload(...)`, `requestHistory(repoId, callback)`, `requestDelete(...)`, `requestRename(...)`, and `requestFolderMutate(...)` over `liskov:sync`.
 - **Dirty/open tracking:** Call `LiskovSyncClient.get().setOpen(repoId, true)` when opening a project from a server drive (`DriveMount.Kind.SERVER_ONLINE`), and `setDirty(repoId, true/false)` when `EditorSession` has unsaved changes so peer pushes trigger `ConflictNotice` instead of clobbering local work.
-- **ACLs & Locks:** Delegate folder/repo permissions to `LiskovServerStore` (`AclConfig` / `AccessEvaluator`: `VIEW`, `EDIT`, `ADMIN`) and editing locks to `LiskovSyncClient.get().requestLockToggle(folderId, repoId, lock, reason, confirmUnlockText)` enforced server-side by `LockGuard`.
+- **ACLs & Locks:** Delegate folder/repo permissions to `LiskovServerStore` (`AclConfig` / `AccessEvaluator`: `VIEW`, `EDIT`, `ADMIN`, mutated client-side via `LiskovSyncClient.get().requestAclMutate(...)` or OP `/liskov acl set`) and editing locks to `LiskovSyncClient.get().requestLockToggle(folderId, repoId, lock, reason, confirmUnlockText)` enforced server-side by `LockGuard`.
 
 ---
 

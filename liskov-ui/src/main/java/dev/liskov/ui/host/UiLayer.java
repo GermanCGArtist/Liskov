@@ -32,6 +32,14 @@ public interface UiLayer {
 
     default void onScroll(double dx, double dy) {}
 
+    /** True while this layer keeps the OS cursor free and prevents {@code MouseHandler.grabMouse()} / camera turn. */
+    default boolean blocksMouseGrab() {
+        return false;
+    }
+
+    /** Called when Minecraft reloads resource packs so layers can refresh GPU texture views. */
+    default void onResourcesReload() {}
+
     /**
      * Optional docked game-viewport rectangle {@code [x, y, w, h]} in display pixels.
      * When non-null, {@link RpRenderer} snapshots {@code mainRenderTarget}, clears to theme BG,

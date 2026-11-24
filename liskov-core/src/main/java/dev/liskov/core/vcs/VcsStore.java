@@ -38,12 +38,19 @@ import java.util.zip.GZIPOutputStream;
  * </ul>
  */
 public final class VcsStore {
+    public static final int DEFAULT_AUTO_MAX_AUTOSAVES = 25;
+    public static final int DEFAULT_AUTO_MAX_AGE_DAYS = 30;
+    public static final int DEFAULT_AUTO_KEEP_RECENT = 15;
+
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Type COMMIT_LIST_TYPE = new TypeToken<List<VcsCommit>>() {}.getType();
 
     private final Path vcsRoot;
     private final Path objectsDir;
     private final Path reposDir;
+    private int autoMaxAutosaves = DEFAULT_AUTO_MAX_AUTOSAVES;
+    private int autoMaxAgeDays = DEFAULT_AUTO_MAX_AGE_DAYS;
+    private int autoKeepRecent = DEFAULT_AUTO_KEEP_RECENT;
 
     public VcsStore(Path vcsRoot) throws IOException {
         this.vcsRoot = vcsRoot.toAbsolutePath().normalize();
@@ -51,6 +58,16 @@ public final class VcsStore {
         this.reposDir = this.vcsRoot.resolve("repos");
         Files.createDirectories(this.objectsDir);
         Files.createDirectories(this.reposDir);
+    }
+
+    /**
+     * Configures automatic cleanup applied on every {@link #snapshot} call.
+     * Pass {@code 0} for {@code maxAutosaves} or {@code maxAgeDays} to disable that limit.
+     */
+    public synchronized void setAutoRetention(int maxAutosaves, int maxAgeDays, int keepRecent) {
+        this.autoMaxAutosaves = Math.max(0, maxAutosaves);
+        this.autoMaxAgeDays = Math.max(0, maxAgeDays);
+        this.autoKeepRecent = Math.max(1, keepRecent);
     }
 
     public Path objectsDir() {
@@ -167,6 +184,22 @@ public final class VcsStore {
         String branch = head.activeBranch;
         String parent = head.branchTips.get(branch);
 
+        // Deduplicate unchanged auto-saves before creating a commit
+        if (autoSave && parent != null && !parent.isBlank()) {
+            VcsCommit tip = findCommit(commits, parent);
+            if (tip != null && tip.tree != null) {
+                Map<String, String> incomingHashes = new LinkedHashMap<>();
+                for (var entry : files.entrySet()) {
+                    String rel = entry.getKey().replace('\\', '/');
+                    byte[] data = entry.getValue() == null ? new byte[0] : entry.getValue();
+                    incomingHashes.put(rel, LiskovPaths.sha256Hex(data));
+                }
+                if (incomingHashes.equals(tip.tree)) {
+                    return tip;
+                }
+            }
+        }
+
         Map<String, String> tree = new LinkedHashMap<>();
         long delta = 0L;
         for (var entry : files.entrySet()) {
@@ -199,7 +232,80 @@ public final class VcsStore {
         head.headCommitId = c.commitId;
         head.branchTips.put(branch, c.commitId);
         saveRepoState(driveId, repoId, head, commits);
+        autoPruneRepo(driveId, repoId, head, commits);
         return c;
+    }
+
+    /**
+     * Convenience wrapper to snapshot every regular non-hidden file under {@code dir} recursively.
+     */
+    public synchronized VcsCommit snapshotDirectory(
+            String driveId,
+            String repoId,
+            Path dir,
+            String authorUuid,
+            String authorName,
+            String message,
+            boolean milestone,
+            boolean autoSave
+    ) throws IOException {
+        Map<String, byte[]> files = new LinkedHashMap<>();
+        Path root = dir.toAbsolutePath().normalize();
+        if (Files.isDirectory(root)) {
+            try (Stream<Path> walk = Files.walk(root)) {
+                for (Path p : walk.filter(Files::isRegularFile).sorted().toList()) {
+                    Path rel = root.relativize(p);
+                    boolean hidden = false;
+                    for (int i = 0; i < rel.getNameCount(); i++) {
+                        if (rel.getName(i).toString().startsWith(".")) {
+                            hidden = true;
+                            break;
+                        }
+                    }
+                    if (!hidden) {
+                        files.put(rel.toString().replace('\\', '/'), Files.readAllBytes(p));
+                    }
+                }
+            }
+        } else if (Files.isRegularFile(root)) {
+            files.put(root.getFileName().toString(), Files.readAllBytes(root));
+        }
+        return snapshot(driveId, repoId, authorUuid, authorName, message, milestone, autoSave, files);
+    }
+
+    private void autoPruneRepo(String driveId, String repoId, VcsHead head, List<VcsCommit> commits) throws IOException {
+        if (commits.size() <= autoKeepRecent) return;
+        if (autoMaxAutosaves <= 0 && autoMaxAgeDays <= 0) return;
+
+        long cutoffMs = autoMaxAgeDays > 0
+                ? System.currentTimeMillis() - (long) autoMaxAgeDays * 86_400_000L
+                : 0L;
+        Set<String> protectedIds = new HashSet<>(head.branchTips.values());
+        if (head.headCommitId != null) protectedIds.add(head.headCommitId);
+
+        List<VcsCommit> kept = new ArrayList<>(commits.size());
+        int autosaveSeen = 0;
+        int removed = 0;
+        for (int i = 0; i < commits.size(); i++) {
+            VcsCommit c = commits.get(i);
+            if (c.autoSave) autosaveSeen++;
+            boolean alwaysKeep = i < autoKeepRecent || c.milestone || protectedIds.contains(c.commitId);
+            if (alwaysKeep || !c.autoSave) {
+                kept.add(c);
+                continue;
+            }
+            boolean tooOld = autoMaxAgeDays > 0 && c.timestampMs < cutoffMs;
+            boolean tooMany = autoMaxAutosaves > 0 && autosaveSeen > autoMaxAutosaves;
+            if (tooOld || tooMany) {
+                removed++;
+            } else {
+                kept.add(c);
+            }
+        }
+        if (removed > 0) {
+            saveRepoState(driveId, repoId, head, kept);
+            gcUnreferencedObjects();
+        }
     }
 
     /**

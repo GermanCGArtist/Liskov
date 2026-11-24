@@ -163,7 +163,9 @@ Thread-safe (`synchronized`) content-addressed snapshot & branching store under 
   - `static String repoIdFor(String relativePath)` (SHA-256 of normalized relative path)
   - `boolean hasBlob(String sha256)`, `String putBlob(byte[] bytes) throws IOException`, `byte[] getBlob(String sha256) throws IOException`, `List<String> missingBlobs(Iterable<String> hashes)`
   - `synchronized VcsHead loadHead(String driveId, String repoId)`, `synchronized List<VcsCommit> loadCommits(String driveId, String repoId)`
-  - `synchronized VcsCommit snapshot(String driveId, String repoId, String authorUuid, String authorName, String message, boolean milestone, boolean autoSave, Map<String, byte[]> files) throws IOException`
+  - `synchronized VcsCommit snapshot(String driveId, String repoId, String authorUuid, String authorName, String message, boolean milestone, boolean autoSave, Map<String, byte[]> files) throws IOException` *(auto-deduplicates identical `autoSave` snapshots and auto-prunes old autosaves + orphaned blobs)*
+  - `synchronized VcsCommit snapshotDirectory(String driveId, String repoId, Path dir, String authorUuid, String authorName, String message, boolean milestone, boolean autoSave) throws IOException`
+  - `synchronized void setAutoRetention(int maxAutosaves, int maxAgeDays, int keepRecent)` *(defaults: `25`, `30`, `15`)*
   - `synchronized void acceptRemoteCommit(String driveId, String repoId, VcsCommit commit, boolean makeActiveHead) throws IOException`
   - `synchronized Map<String, byte[]> readCommitFiles(String driveId, String repoId, String commitId) throws IOException`
   - `synchronized RestoreOutput restore(String driveId, String repoId, String targetCommitId, String actorUuid, String actorName) throws IOException` (`RestoreOutput(VcsCommit commit, Map<String, byte[]> files)`)
@@ -203,11 +205,11 @@ VcsCommit commit = vcs.snapshot(
   - `static Decision canUnlock(LockState lock, String actorUuid, boolean isOp, String confirmText)`
   - `static boolean canModify(LockState lock, String actorUuid)` (author or locker only when locked)
 - **`ServerIdentity`:** Persistent `serverId` (UUID) + `displayName` stored in `server.json`.
-- **`SyncWire`:** Channel `"liskov:sync"`, `PROTOCOL_VERSION = 1`, `CHUNK_SIZE = 64 * 1024`, `MAX_JSON_BYTES = 512 * 1024`, `MAX_CHUNK_BYTES = 128 * 1024`, packet type constants (`HELLO`, `TREE_SNAPSHOT`, `NEED_BLOBS`, `BLOB_CHUNK`, `PUSH_ACK`, `REPO_HEAD_UPDATED`, `HISTORY_RESPONSE`, `ERROR`, `PUSH_CHECK`, `PUSH_COMMIT`, `PULL_REQUEST`, `HISTORY_REQUEST`, `LOCK_MUTATE`, `ACL_MUTATE`) and nested DTOs (`FolderSummary`, `RepoEntry`, `HelloBody`, `PushCheckBody`, `NeedBlobsBody`, `BlobChunkMeta`, `RepoUpdatedBody`, `PullRequestBody`, `LockMutateBody`).
+- **`SyncWire`:** Channel `"liskov:sync"`, `PROTOCOL_VERSION = 1`, `CHUNK_SIZE = 64 * 1024`, `MAX_JSON_BYTES = 512 * 1024`, `MAX_CHUNK_BYTES = 128 * 1024`, packet type constants (`HELLO`, `TREE_SNAPSHOT`, `NEED_BLOBS`, `BLOB_CHUNK`, `PUSH_ACK`, `REPO_HEAD_UPDATED`, `REPO_DELETED`, `HISTORY_RESPONSE`, `ERROR`, `PUSH_CHECK`, `PUSH_COMMIT`, `PULL_REQUEST`, `HISTORY_REQUEST`, `LOCK_MUTATE`, `ACL_MUTATE`, `DELETE_REPO`, `RENAME_REPO`, `FOLDER_MUTATE`) and nested DTOs (`FolderSummary`, `RepoEntry`, `HelloBody`, `PushCheckBody`, `NeedBlobsBody`, `BlobChunkMeta`, `RepoUpdatedBody`, `PullRequestBody`, `LockMutateBody`, `AclMutateBody`, `RepoDeleteBody`, `RepoRenameBody`, `RepoDeletedBody`, `FolderMutateBody`, `HistoryResponseBody`).
 - **`LiskovServerStore`:**
   - `public static final String DEFAULT_FOLDER_ID = "shared";`
-  - `loadOrCreate(Path serverRoot, String defaultDisplayName)` / constructor managing `server.json`, `acl.json`, `_folders.json`, and `.liskov-vcs/`.
-  - `listVisibleFolders(String playerUuid, boolean isOp)`, `HelloBody buildHello(String playerUuid, boolean isOp)`, `List<String> missingBlobs(Iterable<String>)`, `void storeBlob(byte[])`, `byte[] readBlob(String)`, `PushOutcome acceptCommit(actorUuid, actorName, isOp, PushCheckBody)`, `LockGuard.Decision mutateLock(actorUuid, actorName, isOp, LockMutateBody)`, `boolean setAclRole(actorUuid, isOp, targetId, subjectUuid, subjectName, isTeam, AclRole)`, `List<VcsCommit> historyOf(String repoId)`.
+  - `LiskovServerStore(Path serverRoot, String defaultDisplayName)` managing `server.json`, `acl.json`, `shared-folders/`, and `.liskov-vcs/`.
+  - `listVisibleFolders(...)`, `buildHello(...)`, `missingBlobs(...)`, `storeBlob(...)`, `readBlob(...)`, `acceptCommit(...)`, `mutateLock(...)`, `setAclRole(...)`, `historyOf(repoId)`, `findFolderIdOfRepo(repoId)`, `deleteRepo(...)`, `renameRepo(...)`, `mutateFolder(...)`, `revertRepo(...)`.
 
 ---
 
@@ -240,10 +242,16 @@ Client-side `liskov:sync` singleton (`LiskovSyncClient.get()`). All packet handl
 - `public void clearConflict(String repoId)`
 - `public void setDirty(String repoId, boolean dirty)` — prevents auto-overwriting unsaved local edits; instead emits `LiskovReloadBus.ConflictNotice`.
 - `public void setOpen(String repoId, boolean open)` — marks currently open files for automatic `PULL_REQUEST` + `ReloadNotice` on remote head updates.
+- `public String findFolderIdForRepo(String serverId, String repoId)`
+- `public List<VcsCommit> cachedHistory(String repoId)`
 - `public void requestDownload(SyncWire.RepoEntry entry)` — fetches missing blobs into local `.liskov-vcs/`, materializes under `servers/<serverId>/root/`, sets `CacheState.CACHED`.
-- `public void pushCommit(String folderId, String relativePath, String fileTypeId, VcsCommit commit, Map<String, byte[]> files)` — initiates `PUSH_CHECK -> NEED_BLOBS -> BLOB_CHUNK -> PUSH_COMMIT`.
-  - *Constraint:* Ensure blobs for `commit.tree` are already stored in client `VcsStore` (via `VcsStore.snapshot(...)`) before calling `pushCommit`, because `NEED_BLOBS` reads blob bytes from client `VcsStore` rather than the `files` map parameter in `0.1.0+mc26.3`.
+- `public void pushCommit(String folderId, String relativePath, String fileTypeId, VcsCommit commit, Map<String, byte[]> files)` — caches any provided `files` blobs and initiates `PUSH_CHECK -> NEED_BLOBS -> BLOB_CHUNK -> PUSH_COMMIT`.
+- `public VcsCommit publishPath(String folderId, Path localFileOrDir, String serverRelativePath, String fileTypeId, String authorUuid, String authorName, String message, boolean autoSave) throws IOException` — mirrors a local file/folder onto the active server drive, snapshots in `VcsStore`, and pushes over `liskov:sync`.
+- `public void requestHistory(String repoId)` / `requestHistory(String repoId, Consumer<List<VcsCommit>> onResult)`
 - `public void requestLockToggle(String folderId, String repoId, boolean lock, String reason, String confirmUnlockText)`
+- `public void requestAclMutate(String targetId, String subjectUuid, String subjectName, boolean isTeam, AclRole role)`
+- `public void requestDelete(String folderId, String repoId)` / `requestRename(String folderId, String repoId, String newRelativePath)` / `requestFolderMutate(SyncWire.FolderMutateBody body)`
+- `public void setErrorListener(Consumer<String> listener)`
 
 ---
 
@@ -262,11 +270,13 @@ Client-only Fabric layer (`LiskovClientMod`) hosting Dear ImGui `1.90.0` over Re
   - `static boolean imguiWantsKeyboard()`, `static boolean imguiWantsMouse()`, `static boolean imguiWantsTextInput()`
   - `static void setCursor(Cursor cursor)`, `static void captureCursor(boolean capture)`, `static boolean isCursorCaptured()`
   - `static boolean isKeyDown(int glfwKey)`, `static boolean isMouseDown(int glfwButton)`, `static double cursorX()`, `static double cursorY()`
+  - `static boolean blocksMouseGrab()`, `static boolean isDockedViewportActive()`, `static double remapMouseX(double x)`, `static double remapMouseY(double y)`
+  - `static boolean isBackendSupported()`, `static void notifyResourcesReload()`
   - `static long registerTexture(GpuTextureView view)`, `static void unregisterTexture(long texId)`
   - `static void setTextureLookup(LongFunction<GpuTextureView> lookup)` *(Single global slot—prefer `registerTexture`/`unregisterTexture` across multiple mods.)*
 - **`UiLayer` interface:**
   - `String id()`, `int order()`, `boolean visible()`, `void draw()`
-  - Defaults: `wantsKeyboard()`, `wantsMouse()`, `wantsKey(int key, int scancode, int action, int mods)`, `onKey(...)`, `onMouseButton(...)`, `onMouseMove(...)`, `onScroll(...)`, `float[] dockedGameViewport()` (`[x, y, w, h]` in display pixels; first non-null visible layer activates docked game rendering).
+  - Defaults: `wantsKeyboard()`, `wantsMouse()`, `blocksMouseGrab()`, `onResourcesReload()`, `wantsKey(int key, int scancode, int action, int mods)`, `onKey(...)`, `onMouseButton(...)`, `onMouseMove(...)`, `onScroll(...)`, `float[] dockedGameViewport()` (`[x, y, w, h]` in display pixels; first non-null visible layer activates docked game rendering).
 
 ```java
 LiskovUiHost.register(new UiLayer() {

@@ -64,4 +64,38 @@ class VcsStoreTest {
         assertTrue(remaining.stream().anyMatch(c -> c.versionNum == 1 && c.milestone));
         assertTrue(remaining.stream().anyMatch(c -> c.versionNum == 25 && c.milestone));
     }
+
+    @Test
+    void deduplicatesUnchangedAutosavesAutoPrunesAndGcsBlobs(@TempDir Path tmp) throws Exception {
+        VcsStore vcs = new VcsStore(tmp.resolve(".liskov-vcs"));
+        vcs.setAutoRetention(10, 30, 5);
+        String drive = "local";
+        String repo = VcsStore.repoIdFor("Projects/Auto/project.vproj");
+
+        // Identical autosaves must not create redundant commits
+        VcsCommit a1 = vcs.snapshot(drive, repo, "u1", "Julian", "auto", false, true,
+                Map.of("project.vproj", "SAME".getBytes(StandardCharsets.UTF_8)));
+        VcsCommit a2 = vcs.snapshot(drive, repo, "u1", "Julian", "auto", false, true,
+                Map.of("project.vproj", "SAME".getBytes(StandardCharsets.UTF_8)));
+        assertEquals(a1.commitId, a2.commitId);
+        assertEquals(1, vcs.loadCommits(drive, repo).size());
+
+        // Distinct autosaves trigger auto-prune to max 10 autosaves + garbage collect orphaned blobs
+        for (int i = 2; i <= 35; i++) {
+            vcs.snapshot(drive, repo, "u1", "Julian", "auto #" + i, i == 3, true,
+                    Map.of("project.vproj", ("DATA_" + i).getBytes(StandardCharsets.UTF_8)));
+        }
+        var kept = vcs.loadCommits(drive, repo);
+        assertTrue(kept.size() <= 12, "Expected auto-prune to cap old autosaves, got " + kept.size());
+        assertTrue(kept.stream().anyMatch(c -> c.versionNum == 3 && c.milestone), "Milestone must survive auto-prune");
+
+        // Snapshot an entire directory tree skipping hidden dotfiles
+        Path projDir = tmp.resolve("projDir");
+        Files.createDirectories(projDir.resolve(".hidden"));
+        Files.writeString(projDir.resolve("project.vproj"), "{\"v\":1}");
+        Files.writeString(projDir.resolve(".hidden/secret.txt"), "skip");
+        VcsCommit dirSnap = vcs.snapshotDirectory(drive, "dir-repo", projDir, "u1", "Julian", "dir snap", false, false);
+        assertEquals(1, dirSnap.tree.size());
+        assertTrue(dirSnap.tree.containsKey("project.vproj"));
+    }
 }

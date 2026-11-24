@@ -29,6 +29,12 @@ public final class LiskovUiHost {
     public static boolean isMouseDown(int glfwButton) { return HostCore.isMouseDown(glfwButton); }
     public static double cursorX() { return HostCore.cursorX(); }
     public static double cursorY() { return HostCore.cursorY(); }
+    public static boolean blocksMouseGrab() { return HostCore.blocksMouseGrab(); }
+    public static boolean isDockedViewportActive() { return HostCore.isDockedViewportActive(); }
+    public static double remapMouseX(double x) { return HostCore.remapMouseX(x); }
+    public static double remapMouseY(double y) { return HostCore.remapMouseY(y); }
+    public static boolean isBackendSupported() { return HostCore.isBackendSupported(); }
+    public static void notifyResourcesReload() { HostCore.notifyResourcesReload(); }
 
     public static long registerTexture(GpuTextureView view) {
         return RpRenderer.registerTexture(view);

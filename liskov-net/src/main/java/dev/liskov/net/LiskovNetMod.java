@@ -6,7 +6,6 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
-import dev.liskov.core.LiskovPaths;
 import dev.liskov.core.acl.AccessEvaluator;
 import dev.liskov.core.acl.AclRole;
 import dev.liskov.core.acl.LockGuard;
@@ -107,7 +106,7 @@ public final class LiskovNetMod implements ModInitializer {
 
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
             ServerPlayer player = handler.getPlayer();
-            sendHello(player);
+            sendHello(player, SyncWire.HELLO);
         });
 
         ServerPlayNetworking.registerGlobalReceiver(LiskovPayload.TYPE, (payload, context) -> {
@@ -119,15 +118,15 @@ public final class LiskovNetMod implements ModInitializer {
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, env) -> registerCommands(dispatcher));
     }
 
-    private void sendHello(ServerPlayer player) {
+    private void sendHello(ServerPlayer player, String packetType) {
         LiskovServerStore store = this.serverStore;
         if (store == null) return;
         try {
             boolean isOp = isOp(player);
             SyncWire.HelloBody hello = store.buildHello(player.getUUID().toString(), isOp);
-            send(player, SyncWire.HELLO, GSON.toJsonTree(hello), null);
+            send(player, packetType, GSON.toJsonTree(hello), null);
         } catch (IOException e) {
-            LOG.warn("[Liskov] Failed to send HELLO to {}", player.getGameProfile().name(), e);
+            LOG.warn("[Liskov] Failed to send {} to {}", packetType, player.getGameProfile().name(), e);
         }
     }
 
@@ -190,11 +189,10 @@ public final class LiskovNetMod implements ModInitializer {
                         sendError(player, "Permission denied: VIEW role required.");
                         return;
                     }
-                    List<VcsCommit> commits = store.historyOf(repoId);
-                    JsonObject resp = new JsonObject();
-                    resp.addProperty("repoId", repoId);
-                    resp.add("commits", GSON.toJsonTree(commits));
-                    send(player, SyncWire.HISTORY_RESPONSE, resp, null);
+                    SyncWire.HistoryResponseBody resp = new SyncWire.HistoryResponseBody();
+                    resp.repoId = repoId;
+                    resp.commits = store.historyOf(repoId);
+                    send(player, SyncWire.HISTORY_RESPONSE, GSON.toJsonTree(resp), null);
                 }
                 case SyncWire.LOCK_MUTATE -> {
                     SyncWire.LockMutateBody req = GSON.fromJson(body, SyncWire.LockMutateBody.class);
@@ -202,20 +200,60 @@ public final class LiskovNetMod implements ModInitializer {
                     if (!dec.allowed()) {
                         sendError(player, dec.reason());
                     } else {
-                        broadcastHelloSnapshot(server, store);
+                        broadcastTreeSnapshot(server, store);
                     }
                 }
                 case SyncWire.ACL_MUTATE -> {
-                    String targetId = body.get("targetId").getAsString();
-                    String subjectUuid = body.get("subjectUuid").getAsString();
-                    String subjectName = body.has("subjectName") ? body.get("subjectName").getAsString() : "";
-                    boolean isTeam = body.has("isTeam") && body.get("isTeam").getAsBoolean();
-                    AclRole role = AclRole.valueOf(body.get("role").getAsString().toUpperCase());
-                    if (!store.setAclRole(uuid, isOp, targetId, subjectUuid, subjectName, isTeam, role)) {
+                    SyncWire.AclMutateBody req = GSON.fromJson(body, SyncWire.AclMutateBody.class);
+                    if (req == null || req.targetId == null || req.subjectUuid == null || req.role == null) {
+                        sendError(player, "Invalid ACL request.");
+                        return;
+                    }
+                    AclRole role = AclRole.valueOf(req.role.toUpperCase());
+                    if (!store.setAclRole(uuid, isOp, req.targetId, req.subjectUuid, req.subjectName, req.isTeam, role)) {
                         sendError(player, "Permission denied: ADMIN role required.");
                     } else {
-                        broadcastHelloSnapshot(server, store);
+                        broadcastTreeSnapshot(server, store);
                     }
+                }
+                case SyncWire.DELETE_REPO -> {
+                    SyncWire.RepoDeleteBody req = GSON.fromJson(body, SyncWire.RepoDeleteBody.class);
+                    if (req == null) {
+                        sendError(player, "Invalid delete request.");
+                        return;
+                    }
+                    LiskovServerStore.DeleteOutcome out = store.deleteRepo(uuid, isOp, req.folderId, req.repoId);
+                    if (!out.ok()) {
+                        sendError(player, out.error());
+                        return;
+                    }
+                    JsonElement delTree = GSON.toJsonTree(out.deleted());
+                    for (ServerPlayer p : server.getPlayerList().getPlayers()) {
+                        send(p, SyncWire.REPO_DELETED, delTree, null);
+                    }
+                    broadcastTreeSnapshot(server, store);
+                }
+                case SyncWire.RENAME_REPO -> {
+                    SyncWire.RepoRenameBody req = GSON.fromJson(body, SyncWire.RepoRenameBody.class);
+                    if (req == null) {
+                        sendError(player, "Invalid rename request.");
+                        return;
+                    }
+                    LiskovServerStore.PushOutcome out = store.renameRepo(uuid, isOp, req.folderId, req.repoId, req.newRelativePath);
+                    if (!out.ok()) {
+                        sendError(player, out.error());
+                        return;
+                    }
+                    broadcastTreeSnapshot(server, store);
+                }
+                case SyncWire.FOLDER_MUTATE -> {
+                    SyncWire.FolderMutateBody req = GSON.fromJson(body, SyncWire.FolderMutateBody.class);
+                    LiskovServerStore.FolderOutcome out = store.mutateFolder(uuid, name, isOp, req);
+                    if (!out.ok()) {
+                        sendError(player, out.error());
+                        return;
+                    }
+                    broadcastTreeSnapshot(server, store);
                 }
                 default -> LOG.debug("[Liskov] Unknown C2S packet type: {}", type);
             }
@@ -239,8 +277,8 @@ public final class LiskovNetMod implements ModInitializer {
             sendError(sender, out.error());
             return;
         }
-        send(sender, SyncWire.PUSH_ACK, GSON.toJsonTree(out.updated()), null);
         JsonElement updTree = GSON.toJsonTree(out.updated());
+        send(sender, SyncWire.PUSH_ACK, updTree, null);
         for (ServerPlayer p : server.getPlayerList().getPlayers()) {
             if (p.getUUID().equals(sender.getUUID())) continue;
             if (AccessEvaluator.canView(store.acl(), out.updated().entry.repoId, p.getUUID().toString(), isOp(p))) {
@@ -249,9 +287,10 @@ public final class LiskovNetMod implements ModInitializer {
         }
     }
 
-    private void broadcastHelloSnapshot(MinecraftServer server, LiskovServerStore store) {
+    private void broadcastTreeSnapshot(MinecraftServer server, LiskovServerStore store) {
+        if (server == null || store == null) return;
         for (ServerPlayer p : server.getPlayerList().getPlayers()) {
-            sendHello(p);
+            sendHello(p, SyncWire.TREE_SNAPSHOT);
         }
     }
 
@@ -292,6 +331,18 @@ public final class LiskovNetMod implements ModInitializer {
                 .hasPermission(new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS));
     }
 
+    private static String actorUuid(CommandSourceStack src) {
+        return src.getEntity() instanceof ServerPlayer sp ? sp.getUUID().toString() : "console";
+    }
+
+    private static String actorName(CommandSourceStack src) {
+        return src.getEntity() instanceof ServerPlayer sp ? sp.getGameProfile().name() : "Console";
+    }
+
+    private static boolean sourceIsOp(CommandSourceStack src) {
+        return src.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS));
+    }
+
     private void registerCommands(CommandDispatcher<CommandSourceStack> d) {
         d.register(Commands.literal("liskov")
                 .then(Commands.literal("status").executes(ctx -> {
@@ -302,7 +353,7 @@ public final class LiskovNetMod implements ModInitializer {
                     return 1;
                 }))
                 .then(Commands.literal("server")
-                        .requires(src -> src.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))
+                        .requires(LiskovNetMod::sourceIsOp)
                         .then(Commands.literal("name")
                                 .then(Commands.argument("displayName", StringArgumentType.greedyString()).executes(ctx -> {
                                     LiskovServerStore s = serverStore;
@@ -310,7 +361,7 @@ public final class LiskovNetMod implements ModInitializer {
                                     String next = StringArgumentType.getString(ctx, "displayName");
                                     try {
                                         s.renameServer(next);
-                                        broadcastHelloSnapshot(ctx.getSource().getServer(), s);
+                                        broadcastTreeSnapshot(ctx.getSource().getServer(), s);
                                         ctx.getSource().sendSuccess(() -> Component.literal(
                                                 "[Liskov] Renamed server drive to '" + s.identity().displayName + "'"), true);
                                         return 1;
@@ -320,7 +371,7 @@ public final class LiskovNetMod implements ModInitializer {
                                     }
                                 }))))
                 .then(Commands.literal("acl")
-                        .requires(src -> src.permissions().hasPermission(new Permission.HasCommandLevel(PermissionLevel.GAMEMASTERS)))
+                        .requires(LiskovNetMod::sourceIsOp)
                         .then(Commands.literal("team")
                                 .then(Commands.literal("add")
                                         .then(Commands.argument("team", StringArgumentType.word())
@@ -332,6 +383,7 @@ public final class LiskovNetMod implements ModInitializer {
                                                     s.acl().addTeamMember(team, targetUuid);
                                                     try {
                                                         s.saveAcl();
+                                                        broadcastTreeSnapshot(ctx.getSource().getServer(), s);
                                                         ctx.getSource().sendSuccess(() -> Component.literal(
                                                                 "[Liskov ACL] Added " + targetUuid + " to @" + team), true);
                                                         return 1;
@@ -339,6 +391,127 @@ public final class LiskovNetMod implements ModInitializer {
                                                         ctx.getSource().sendFailure(Component.literal("[Liskov ACL] Failed: " + e.getMessage()));
                                                         return 0;
                                                     }
-                                                })))))));
+                                                })))))
+                        .then(Commands.literal("set")
+                                .then(Commands.argument("targetId", StringArgumentType.word())
+                                        .then(Commands.argument("subject", StringArgumentType.word())
+                                                .then(Commands.argument("role", StringArgumentType.word()).executes(ctx -> {
+                                                    LiskovServerStore s = serverStore;
+                                                    if (s == null) return 0;
+                                                    String targetId = StringArgumentType.getString(ctx, "targetId");
+                                                    String rawSubject = StringArgumentType.getString(ctx, "subject");
+                                                    boolean isTeam = rawSubject.startsWith("@");
+                                                    String subject = isTeam ? rawSubject.substring(1) : rawSubject;
+                                                    AclRole role;
+                                                    try {
+                                                        role = AclRole.valueOf(StringArgumentType.getString(ctx, "role").toUpperCase());
+                                                    } catch (IllegalArgumentException e) {
+                                                        ctx.getSource().sendFailure(Component.literal("[Liskov ACL] Role must be NONE, VIEW, EDIT, or ADMIN"));
+                                                        return 0;
+                                                    }
+                                                    try {
+                                                        boolean ok = s.setAclRole(actorUuid(ctx.getSource()), sourceIsOp(ctx.getSource()),
+                                                                targetId, subject, "", isTeam, role);
+                                                        if (!ok) {
+                                                            ctx.getSource().sendFailure(Component.literal("[Liskov ACL] Permission denied."));
+                                                            return 0;
+                                                        }
+                                                        broadcastTreeSnapshot(ctx.getSource().getServer(), s);
+                                                        ctx.getSource().sendSuccess(() -> Component.literal(
+                                                                "[Liskov ACL] " + targetId + ": " + rawSubject + " -> " + role), true);
+                                                        return 1;
+                                                    } catch (IOException e) {
+                                                        ctx.getSource().sendFailure(Component.literal("[Liskov ACL] Failed: " + e.getMessage()));
+                                                        return 0;
+                                                    }
+                                                }))))))
+                .then(Commands.literal("lock")
+                        .then(Commands.argument("repoId", StringArgumentType.word())
+                                .executes(ctx -> executeLock(ctx.getSource(), StringArgumentType.getString(ctx, "repoId"), true, "Locked via /liskov", ""))
+                                .then(Commands.argument("reason", StringArgumentType.greedyString())
+                                        .executes(ctx -> executeLock(ctx.getSource(), StringArgumentType.getString(ctx, "repoId"), true,
+                                                StringArgumentType.getString(ctx, "reason"), "")))))
+                .then(Commands.literal("unlock")
+                        .then(Commands.argument("repoId", StringArgumentType.word())
+                                .executes(ctx -> executeLock(ctx.getSource(), StringArgumentType.getString(ctx, "repoId"), false, "", ""))
+                                .then(Commands.argument("confirm", StringArgumentType.word())
+                                        .executes(ctx -> executeLock(ctx.getSource(), StringArgumentType.getString(ctx, "repoId"), false, "",
+                                                StringArgumentType.getString(ctx, "confirm"))))))
+                .then(Commands.literal("history")
+                        .then(Commands.argument("repoId", StringArgumentType.word()).executes(ctx -> {
+                            LiskovServerStore s = serverStore;
+                            if (s == null) return 0;
+                            String repoId = StringArgumentType.getString(ctx, "repoId");
+                            if (!AccessEvaluator.canView(s.acl(), repoId, actorUuid(ctx.getSource()), sourceIsOp(ctx.getSource()))) {
+                                ctx.getSource().sendFailure(Component.literal("[Liskov] Permission denied."));
+                                return 0;
+                            }
+                            List<VcsCommit> list = s.historyOf(repoId);
+                            if (list.isEmpty()) {
+                                ctx.getSource().sendSuccess(() -> Component.literal("[Liskov] No commits for " + repoId), false);
+                                return 1;
+                            }
+                            ctx.getSource().sendSuccess(() -> Component.literal("[Liskov] History for " + repoId + " (" + list.size() + "):"), false);
+                            for (int i = 0; i < Math.min(10, list.size()); i++) {
+                                VcsCommit c = list.get(i);
+                                ctx.getSource().sendSuccess(() -> Component.literal(
+                                        "  v" + c.versionNum + " #" + c.shortId() + " [" + c.authorName + "] " + c.message), false);
+                            }
+                            return 1;
+                        })))
+                .then(Commands.literal("revert")
+                        .then(Commands.argument("repoId", StringArgumentType.word())
+                                .then(Commands.argument("commitId", StringArgumentType.word()).executes(ctx -> {
+                                    LiskovServerStore s = serverStore;
+                                    if (s == null) return 0;
+                                    String repoId = StringArgumentType.getString(ctx, "repoId");
+                                    String commitId = StringArgumentType.getString(ctx, "commitId");
+                                    try {
+                                        String fid = s.findFolderIdOfRepo(repoId);
+                                        LiskovServerStore.PushOutcome out = s.revertRepo(
+                                                actorUuid(ctx.getSource()), actorName(ctx.getSource()),
+                                                sourceIsOp(ctx.getSource()), fid, repoId, commitId);
+                                        if (!out.ok()) {
+                                            ctx.getSource().sendFailure(Component.literal("[Liskov] " + out.error()));
+                                            return 0;
+                                        }
+                                        JsonElement updTree = GSON.toJsonTree(out.updated());
+                                        for (ServerPlayer p : ctx.getSource().getServer().getPlayerList().getPlayers()) {
+                                            if (AccessEvaluator.canView(s.acl(), repoId, p.getUUID().toString(), isOp(p))) {
+                                                send(p, SyncWire.REPO_HEAD_UPDATED, updTree, null);
+                                            }
+                                        }
+                                        ctx.getSource().sendSuccess(() -> Component.literal(
+                                                "[Liskov] Reverted " + repoId + " -> v" + out.updated().entry.versionNum), true);
+                                        return 1;
+                                    } catch (IOException e) {
+                                        ctx.getSource().sendFailure(Component.literal("[Liskov] Revert failed: " + e.getMessage()));
+                                        return 0;
+                                    }
+                                })))));
+    }
+
+    private int executeLock(CommandSourceStack src, String repoId, boolean locked, String reason, String confirm) {
+        LiskovServerStore s = serverStore;
+        if (s == null) return 0;
+        SyncWire.LockMutateBody body = new SyncWire.LockMutateBody();
+        body.folderId = s.findFolderIdOfRepo(repoId);
+        body.repoId = repoId;
+        body.locked = locked;
+        body.reason = reason;
+        body.confirmUnlockText = confirm;
+        try {
+            LockGuard.Decision dec = s.mutateLock(actorUuid(src), actorName(src), sourceIsOp(src), body);
+            if (!dec.allowed()) {
+                src.sendFailure(Component.literal("[Liskov LockGuard] " + dec.reason()));
+                return 0;
+            }
+            broadcastTreeSnapshot(src.getServer(), s);
+            src.sendSuccess(() -> Component.literal("[Liskov LockGuard] " + dec.reason()), true);
+            return 1;
+        } catch (IOException e) {
+            src.sendFailure(Component.literal("[Liskov LockGuard] Failed: " + e.getMessage()));
+            return 0;
+        }
     }
 }

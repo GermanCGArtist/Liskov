@@ -8,6 +8,8 @@ import dev.liskov.core.CacheState;
 import dev.liskov.core.DriveMount;
 import dev.liskov.core.LiskovFs;
 import dev.liskov.core.LiskovPaths;
+import dev.liskov.core.acl.AclRole;
+import dev.liskov.core.sync.LiskovServerStore;
 import dev.liskov.core.sync.SyncWire;
 import dev.liskov.core.vcs.VcsCommit;
 import dev.liskov.core.vcs.VcsStore;
@@ -22,15 +24,19 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
+import java.util.stream.Stream;
 
 /**
  * Client-side {@code liskov:sync} state machine: mounts persistent {@code serverId} drives on HELLO,
- * handles Smart On-Demand {@code CLOUD -> CACHED} downloads, pushes SHA-256 deltas on save,
- * auto-reloads clean open/pinned items on peer saves, and flags conflicts when local edits are dirty.
+ * handles Smart On-Demand {@code CLOUD -> CACHED} downloads, pushes SHA-256 deltas on save or transfer,
+ * syncs remote history/ACL/delete/rename/folder ops, auto-reloads clean open/pinned items on peer saves,
+ * and flags conflicts when local edits are dirty.
  */
 public final class LiskovSyncClient {
     private static final Logger LOG = LoggerFactory.getLogger("liskov-sync-client");
@@ -40,13 +46,18 @@ public final class LiskovSyncClient {
     private boolean registered;
     private volatile String activeServerId;
     private volatile String activeServerName;
+    private volatile Consumer<String> errorListener;
+
     private final Map<String, List<SyncWire.FolderSummary>> serverFoldersByServer = new ConcurrentHashMap<>();
     private final Set<String> dirtyRepos = ConcurrentHashMap.newKeySet();
     private final Set<String> openRepos = ConcurrentHashMap.newKeySet();
     private final Map<String, LiskovReloadBus.ConflictNotice> conflicts = new ConcurrentHashMap<>();
     private final Map<String, SyncWire.PushCheckBody> awaitingUpload = new ConcurrentHashMap<>();
+    private final Map<String, byte[]> pendingUploadBlobs = new ConcurrentHashMap<>();
     private final Map<String, ByteChunkAcc> incomingChunks = new ConcurrentHashMap<>();
     private final Map<String, SyncWire.RepoUpdatedBody> pendingAutoApply = new ConcurrentHashMap<>();
+    private final Map<String, List<VcsCommit>> remoteHistoryByRepo = new ConcurrentHashMap<>();
+    private final Map<String, List<Consumer<List<VcsCommit>>>> historyWaiters = new ConcurrentHashMap<>();
 
     private static final class ByteChunkAcc {
         final byte[][] parts;
@@ -75,6 +86,10 @@ public final class LiskovSyncClient {
         return INSTANCE;
     }
 
+    public void setErrorListener(Consumer<String> listener) {
+        this.errorListener = listener;
+    }
+
     public synchronized void initClientNetworking() {
         if (registered) return;
         registered = true;
@@ -86,6 +101,8 @@ public final class LiskovSyncClient {
             String prev = activeServerId;
             activeServerId = null;
             activeServerName = null;
+            awaitingUpload.clear();
+            pendingUploadBlobs.clear();
             if (prev != null && LiskovFs.isInitialized()) {
                 LiskovFs.get().drives().markOffline(prev);
             }
@@ -102,6 +119,21 @@ public final class LiskovSyncClient {
 
     public List<SyncWire.FolderSummary> foldersOf(String serverId) {
         return serverFoldersByServer.getOrDefault(serverId, List.of());
+    }
+
+    public String findFolderIdForRepo(String serverId, String repoId) {
+        if (serverId == null || repoId == null) return LiskovServerStore.DEFAULT_FOLDER_ID;
+        for (SyncWire.FolderSummary fs : foldersOf(serverId)) {
+            if (fs.entries == null) continue;
+            for (SyncWire.RepoEntry e : fs.entries) {
+                if (repoId.equals(e.repoId)) return fs.folderId != null ? fs.folderId : LiskovServerStore.DEFAULT_FOLDER_ID;
+            }
+        }
+        return LiskovServerStore.DEFAULT_FOLDER_ID;
+    }
+
+    public List<VcsCommit> cachedHistory(String repoId) {
+        return repoId == null ? List.of() : remoteHistoryByRepo.getOrDefault(repoId, List.of());
     }
 
     public Map<String, LiskovReloadBus.ConflictNotice> activeConflicts() {
@@ -150,29 +182,141 @@ public final class LiskovSyncClient {
         }
     }
 
-    /** Pushes a new commit on the active server drive using SHA-256 delta negotiation. */
+    /**
+     * Pushes a commit on the active server drive using SHA-256 delta negotiation.
+     * Any raw payloads passed in {@code files} are cached in client {@link VcsStore} and memory
+     * so {@link SyncWire#NEED_BLOBS} always finds every required SHA-256 blob.
+     */
     public void pushCommit(String folderId, String relativePath, String fileTypeId, VcsCommit commit, Map<String, byte[]> files) {
         if (activeServerId == null || commit == null) return;
+        if (files != null && !files.isEmpty()) {
+            try {
+                VcsStore vcs = LiskovFs.isInitialized() ? new VcsStore(LiskovFs.get().vcsRootDir()) : null;
+                for (byte[] data : files.values()) {
+                    if (data == null) continue;
+                    String sha = LiskovPaths.sha256Hex(data);
+                    pendingUploadBlobs.put(sha, data);
+                    if (vcs != null && !vcs.hasBlob(sha)) {
+                        vcs.putBlob(data);
+                    }
+                }
+            } catch (IOException e) {
+                LOG.warn("[Liskov] Failed caching push blobs for {}", relativePath, e);
+            }
+        }
+        String cleanRel = relativePath == null ? "" : relativePath.replace('\\', '/');
+        String repoId = VcsStore.repoIdFor(cleanRel);
+        String effectiveFolder = (folderId == null || folderId.isBlank())
+                ? findFolderIdForRepo(activeServerId, repoId) : folderId;
         SyncWire.PushCheckBody check = new SyncWire.PushCheckBody();
-        check.folderId = folderId;
-        check.relativePath = relativePath;
+        check.folderId = effectiveFolder;
+        check.relativePath = cleanRel;
         check.fileTypeId = fileTypeId;
         check.commit = commit;
-        check.requiredHashes = new ArrayList<>(commit.tree.values());
-        String repoId = VcsStore.repoIdFor(relativePath);
+        check.requiredHashes = commit.tree != null ? new ArrayList<>(commit.tree.values()) : List.of();
         awaitingUpload.put(repoId, check);
         send(SyncWire.PUSH_CHECK, GSON.toJsonTree(check), null);
+    }
+
+    /**
+     * Snapshots a local file or project directory into client {@link VcsStore} and uploads it to the
+     * active online server drive in one call.
+     */
+    public VcsCommit publishPath(
+            String folderId,
+            Path localFileOrDir,
+            String serverRelativePath,
+            String fileTypeId,
+            String authorUuid,
+            String authorName,
+            String message,
+            boolean autoSave
+    ) throws IOException {
+        if (activeServerId == null || !LiskovFs.isInitialized()) return null;
+        DriveMount mount = LiskovFs.get().drives().get(activeServerId);
+        if (mount == null || mount.isOffline()) return null;
+
+        String cleanRel = serverRelativePath.replace('\\', '/');
+        Map<String, byte[]> files = collectPayloadFiles(localFileOrDir);
+        if (files.isEmpty()) return null;
+
+        Path driveTarget = LiskovPaths.resolveInside(mount.rootDir(), cleanRel);
+        if (Files.isDirectory(localFileOrDir)) {
+            LiskovPaths.copyDirectoryOverwrite(localFileOrDir, driveTarget);
+        } else if (Files.isRegularFile(localFileOrDir)) {
+            LiskovPaths.writeAtomicBytes(driveTarget, Files.readAllBytes(localFileOrDir));
+        }
+        if (mount.cacheStateOf(cleanRel) != CacheState.PINNED_OFFLINE) {
+            mount.setCacheState(cleanRel, CacheState.CACHED);
+        }
+        mount.saveMetadata();
+
+        String repoId = VcsStore.repoIdFor(cleanRel);
+        VcsStore vcs = new VcsStore(LiskovFs.get().vcsRootDir());
+        VcsCommit commit = vcs.snapshot(
+                activeServerId, repoId, authorUuid, authorName, message, false, autoSave, files);
+        String effFolder = (folderId == null || folderId.isBlank())
+                ? findFolderIdForRepo(activeServerId, repoId) : folderId;
+        pushCommit(effFolder, cleanRel, fileTypeId, commit, files);
+        return commit;
+    }
+
+    public void requestHistory(String repoId) {
+        requestHistory(repoId, null);
+    }
+
+    public void requestHistory(String repoId, Consumer<List<VcsCommit>> onResult) {
+        if (activeServerId == null || repoId == null || repoId.isBlank()) return;
+        if (onResult != null) {
+            historyWaiters.computeIfAbsent(repoId, k -> Collections.synchronizedList(new ArrayList<>())).add(onResult);
+        }
+        JsonObject body = new JsonObject();
+        body.addProperty("repoId", repoId);
+        send(SyncWire.HISTORY_REQUEST, body, null);
     }
 
     public void requestLockToggle(String folderId, String repoId, boolean lock, String reason, String confirmUnlockText) {
         if (activeServerId == null) return;
         SyncWire.LockMutateBody body = new SyncWire.LockMutateBody();
-        body.folderId = folderId;
+        body.folderId = (folderId == null || folderId.isBlank()) ? findFolderIdForRepo(activeServerId, repoId) : folderId;
         body.repoId = repoId;
         body.locked = lock;
         body.reason = reason == null ? "" : reason;
         body.confirmUnlockText = confirmUnlockText == null ? "" : confirmUnlockText;
         send(SyncWire.LOCK_MUTATE, GSON.toJsonTree(body), null);
+    }
+
+    public void requestAclMutate(String targetId, String subjectUuid, String subjectName, boolean isTeam, AclRole role) {
+        if (activeServerId == null || targetId == null || subjectUuid == null || role == null) return;
+        SyncWire.AclMutateBody body = new SyncWire.AclMutateBody();
+        body.targetId = targetId;
+        body.subjectUuid = subjectUuid;
+        body.subjectName = subjectName == null ? "" : subjectName;
+        body.isTeam = isTeam;
+        body.role = role.name();
+        send(SyncWire.ACL_MUTATE, GSON.toJsonTree(body), null);
+    }
+
+    public void requestDelete(String folderId, String repoId) {
+        if (activeServerId == null || repoId == null || repoId.isBlank()) return;
+        SyncWire.RepoDeleteBody body = new SyncWire.RepoDeleteBody();
+        body.folderId = (folderId == null || folderId.isBlank()) ? findFolderIdForRepo(activeServerId, repoId) : folderId;
+        body.repoId = repoId;
+        send(SyncWire.DELETE_REPO, GSON.toJsonTree(body), null);
+    }
+
+    public void requestRename(String folderId, String repoId, String newRelativePath) {
+        if (activeServerId == null || repoId == null || newRelativePath == null) return;
+        SyncWire.RepoRenameBody body = new SyncWire.RepoRenameBody();
+        body.folderId = (folderId == null || folderId.isBlank()) ? findFolderIdForRepo(activeServerId, repoId) : folderId;
+        body.repoId = repoId;
+        body.newRelativePath = newRelativePath.replace('\\', '/');
+        send(SyncWire.RENAME_REPO, GSON.toJsonTree(body), null);
+    }
+
+    public void requestFolderMutate(SyncWire.FolderMutateBody body) {
+        if (activeServerId == null || body == null) return;
+        send(SyncWire.FOLDER_MUTATE, GSON.toJsonTree(body), null);
     }
 
     private void handleS2C(LiskovPayload payload) {
@@ -184,15 +328,15 @@ public final class LiskovSyncClient {
                     ? env.getAsJsonObject("body") : new JsonObject();
 
             switch (type) {
-                case SyncWire.HELLO -> {
+                case SyncWire.HELLO, SyncWire.TREE_SNAPSHOT -> {
                     SyncWire.HelloBody hello = GSON.fromJson(body, SyncWire.HelloBody.class);
                     activeServerId = hello.serverId;
                     activeServerName = hello.displayName;
                     serverFoldersByServer.put(hello.serverId, hello.folders != null ? hello.folders : List.of());
                     DriveMount mount = LiskovFs.get().drives().mountServerOnline(hello.serverId, hello.displayName);
                     VcsStore vcs = new VcsStore(LiskovFs.get().vcsRootDir());
-                    // Auto-sync pinned or open items whose blobs are missing
                     for (SyncWire.FolderSummary fs : serverFoldersByServer.get(hello.serverId)) {
+                        if (fs.entries == null) continue;
                         for (SyncWire.RepoEntry entry : fs.entries) {
                             if (mount.isPinnedOffline(entry.relativePath) || openRepos.contains(entry.repoId)) {
                                 if (!vcs.missingBlobs(entry.tree.values()).isEmpty()) {
@@ -210,7 +354,8 @@ public final class LiskovSyncClient {
                     if (pending == null) return;
                     VcsStore vcs = new VcsStore(LiskovFs.get().vcsRootDir());
                     for (String sha : need.missingHashes) {
-                        byte[] raw = vcs.getBlob(sha);
+                        byte[] raw = pendingUploadBlobs.get(sha);
+                        if (raw == null) raw = vcs.getBlob(sha);
                         if (raw != null) sendBlobInChunks("up-" + sha.substring(0, 8), sha, raw);
                     }
                     send(SyncWire.PUSH_COMMIT, GSON.toJsonTree(pending), null);
@@ -218,7 +363,10 @@ public final class LiskovSyncClient {
                 case SyncWire.PUSH_ACK -> {
                     SyncWire.RepoUpdatedBody ack = GSON.fromJson(body, SyncWire.RepoUpdatedBody.class);
                     if (ack != null && ack.entry != null) {
-                        awaitingUpload.remove(ack.entry.repoId);
+                        SyncWire.PushCheckBody done = awaitingUpload.remove(ack.entry.repoId);
+                        if (done != null && done.requiredHashes != null) {
+                            for (String sha : done.requiredHashes) pendingUploadBlobs.remove(sha);
+                        }
                         updateCachedIndexEntry(ack.serverId, ack.entry);
                     }
                 }
@@ -238,6 +386,12 @@ public final class LiskovSyncClient {
                     SyncWire.RepoUpdatedBody upd = GSON.fromJson(body, SyncWire.RepoUpdatedBody.class);
                     if (upd == null || upd.entry == null) return;
                     updateCachedIndexEntry(upd.serverId, upd.entry);
+                    if (upd.commit != null) {
+                        List<VcsCommit> hist = new ArrayList<>(remoteHistoryByRepo.getOrDefault(upd.entry.repoId, List.of()));
+                        hist.removeIf(c -> upd.commit.commitId.equals(c.commitId));
+                        hist.add(0, upd.commit);
+                        remoteHistoryByRepo.put(upd.entry.repoId, Collections.unmodifiableList(hist));
+                    }
                     DriveMount mount = LiskovFs.get().drives().get(upd.serverId);
                     boolean autoInterested = openRepos.contains(upd.entry.repoId)
                             || (mount != null && mount.isPinnedOffline(upd.entry.relativePath));
@@ -253,12 +407,75 @@ public final class LiskovSyncClient {
                     }
                     requestDownload(upd.entry);
                 }
-                case SyncWire.ERROR -> LOG.warn("[Liskov] Server error: {}", body.get("error"));
+                case SyncWire.HISTORY_RESPONSE -> {
+                    SyncWire.HistoryResponseBody hr = GSON.fromJson(body, SyncWire.HistoryResponseBody.class);
+                    if (hr == null || hr.repoId == null) return;
+                    List<VcsCommit> list = hr.commits != null ? List.copyOf(hr.commits) : List.of();
+                    remoteHistoryByRepo.put(hr.repoId, list);
+                    List<Consumer<List<VcsCommit>>> waiters = historyWaiters.remove(hr.repoId);
+                    if (waiters != null) {
+                        synchronized (waiters) {
+                            for (Consumer<List<VcsCommit>> cb : waiters) {
+                                try { cb.accept(list); } catch (Throwable ignored) {}
+                            }
+                        }
+                    }
+                }
+                case SyncWire.REPO_DELETED -> {
+                    SyncWire.RepoDeletedBody del = GSON.fromJson(body, SyncWire.RepoDeletedBody.class);
+                    if (del == null || del.repoId == null) return;
+                    removeCachedIndexEntry(del.serverId, del.folderId, del.repoId);
+                    conflicts.remove(del.repoId);
+                    remoteHistoryByRepo.remove(del.repoId);
+                    if (del.relativePath != null && !dirtyRepos.contains(del.repoId)) {
+                        DriveMount mount = LiskovFs.get().drives().get(del.serverId);
+                        if (mount != null) {
+                            try {
+                                Path cached = LiskovPaths.resolveInside(mount.rootDir(), del.relativePath);
+                                if (Files.isDirectory(cached)) LiskovPaths.deleteRecursive(cached);
+                                else Files.deleteIfExists(cached);
+                            } catch (Exception ignored) {}
+                        }
+                    }
+                    LiskovReloadBus.fireReload(new LiskovReloadBus.ReloadNotice(
+                            del.serverId, del.relativePath, 0, ""));
+                }
+                case SyncWire.ERROR -> {
+                    String msg = body.has("error") ? body.get("error").getAsString() : "Unknown server error";
+                    LOG.warn("[Liskov] Server error: {}", msg);
+                    Consumer<String> listener = this.errorListener;
+                    if (listener != null) {
+                        try { listener.accept(msg); } catch (Throwable ignored) {}
+                    }
+                }
                 default -> LOG.debug("[Liskov] Unhandled S2C message: {}", type);
             }
         } catch (Exception e) {
             LOG.warn("[Liskov] Error handling S2C packet", e);
         }
+    }
+
+    private static Map<String, byte[]> collectPayloadFiles(Path localFileOrDir) throws IOException {
+        Map<String, byte[]> files = new LinkedHashMap<>();
+        Path root = localFileOrDir.toAbsolutePath().normalize();
+        if (Files.isRegularFile(root)) {
+            files.put(root.getFileName().toString(), Files.readAllBytes(root));
+        } else if (Files.isDirectory(root)) {
+            try (Stream<Path> walk = Files.walk(root)) {
+                for (Path p : walk.filter(Files::isRegularFile).sorted().toList()) {
+                    Path rel = root.relativize(p);
+                    boolean hidden = false;
+                    for (int i = 0; i < rel.getNameCount(); i++) {
+                        if (rel.getName(i).toString().startsWith(".")) {
+                            hidden = true;
+                            break;
+                        }
+                    }
+                    if (!hidden) files.put(rel.toString().replace('\\', '/'), Files.readAllBytes(p));
+                }
+            }
+        }
+        return files;
     }
 
     private void tryFlushPendingDownloads(VcsStore vcs) throws IOException {
@@ -317,6 +534,16 @@ public final class LiskovSyncClient {
             }
             fs.entries.add(0, updated);
             return;
+        }
+    }
+
+    private void removeCachedIndexEntry(String serverId, String folderId, String repoId) {
+        if (serverId == null || repoId == null) return;
+        List<SyncWire.FolderSummary> list = serverFoldersByServer.get(serverId);
+        if (list == null) return;
+        for (SyncWire.FolderSummary fs : list) {
+            if (folderId != null && !folderId.equals(fs.folderId)) continue;
+            if (fs.entries != null) fs.entries.removeIf(e -> repoId.equals(e.repoId));
         }
     }
 

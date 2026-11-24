@@ -26,6 +26,7 @@ public final class SyncWire {
     public static final String BLOB_CHUNK = "BLOB_CHUNK";
     public static final String PUSH_ACK = "PUSH_ACK";
     public static final String REPO_HEAD_UPDATED = "REPO_HEAD_UPDATED";
+    public static final String REPO_DELETED = "REPO_DELETED";
     public static final String HISTORY_RESPONSE = "HISTORY_RESPONSE";
     public static final String ERROR = "ERROR";
 
@@ -36,6 +37,9 @@ public final class SyncWire {
     public static final String HISTORY_REQUEST = "HISTORY_REQUEST";
     public static final String LOCK_MUTATE = "LOCK_MUTATE";
     public static final String ACL_MUTATE = "ACL_MUTATE";
+    public static final String DELETE_REPO = "DELETE_REPO";
+    public static final String RENAME_REPO = "RENAME_REPO";
+    public static final String FOLDER_MUTATE = "FOLDER_MUTATE";
 
     private SyncWire() {}
 
@@ -112,5 +116,44 @@ public final class SyncWire {
         public boolean locked;
         public String reason = "";
         public String confirmUnlockText = "";
+    }
+
+    public static final class AclMutateBody {
+        public String targetId;
+        public String subjectUuid;
+        public String subjectName = "";
+        public boolean isTeam;
+        public String role;
+    }
+
+    public static final class RepoDeleteBody {
+        public String folderId;
+        public String repoId;
+    }
+
+    public static final class RepoRenameBody {
+        public String folderId;
+        public String repoId;
+        public String newRelativePath;
+    }
+
+    public static final class RepoDeletedBody {
+        public String serverId;
+        public String folderId;
+        public String repoId;
+        public String relativePath;
+    }
+
+    public static final class FolderMutateBody {
+        /** CREATE | RENAME | ARCHIVE | UNARCHIVE | DELETE */
+        public String action;
+        public String folderId;
+        public String name;
+        public String colorRole = "focus";
+    }
+
+    public static final class HistoryResponseBody {
+        public String repoId;
+        public List<VcsCommit> commits = new ArrayList<>();
     }
 }

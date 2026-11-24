@@ -11,6 +11,7 @@ import dev.liskov.core.LitematicReader;
 import dev.liskov.core.ReloadWatcher;
 import dev.liskov.core.SemanticColor;
 import dev.liskov.core.TrashManager;
+import dev.liskov.core.acl.AclRole;
 import dev.liskov.core.sync.SyncWire;
 import dev.liskov.core.vcs.VcsCommit;
 import dev.liskov.core.vcs.VcsHead;
@@ -55,6 +56,7 @@ final class InspectorPane {
     private final ImString branchBuf = new ImString(64);
     private final ImString snapshotNoteBuf = new ImString(128);
     private final ImString lockConfirmBuf = new ImString(32);
+    private final ImString aclSubjectBuf = new ImString(64);
     private String previewCommitId;
     private VcsCommit previewCommit;
     private boolean showUnlockPopup = false;
@@ -205,11 +207,15 @@ final class InspectorPane {
                 int ok = 0;
                 for (Path p : List.copyOf(win.multiSelection)) {
                     try {
-                        LiskovFs.get().drives().transfer(drive, safeRel(drive, p), onlineSrv, "");
+                        var res = LiskovFs.get().drives().transfer(drive, safeRel(drive, p), onlineSrv, "");
+                        String dstRel = safeRel(onlineSrv, res.destination());
+                        String ftId = LiskovFs.get().fileTypes().detect(res.destination()).id();
+                        LiskovSyncClient.get().publishPath(null, res.destination(), dstRel, ftId,
+                                playerUuid(), playerName(), "Uploaded selection", false);
                         ok++;
                     } catch (Exception ignored) {}
                 }
-                MubWidgets.ToastHost.push("Copied " + ok + " item(s) to " + onlineSrv.displayName(), SemanticColor.BOT);
+                MubWidgets.ToastHost.push("Uploaded " + ok + " item(s) to " + onlineSrv.displayName(), SemanticColor.BOT);
             }
             MubWidgets.tooltip("Copy Selection to Server Drive", "Uploads copies of all selected items to the connected server drive.");
         } else {
@@ -243,7 +249,11 @@ final class InspectorPane {
             LiskovFs fs = LiskovFs.get();
             for (Path p : List.copyOf(win.multiSelection)) {
                 try {
+                    String rel = safeRel(drive, p);
                     trash.moveToTrash(p, fs.fileTypes().detect(p).id());
+                    if (!drive.isLocal() && !rel.isEmpty()) {
+                        LiskovSyncClient.get().requestDelete(null, VcsStore.repoIdFor(rel));
+                    }
                     ok++;
                 } catch (Exception ignored) {}
             }
@@ -361,13 +371,16 @@ final class InspectorPane {
             DriveMount onlineSrv = activeOnlineServer();
             if (onlineSrv != null && MubWidgets.termButton("COPY -> " + onlineSrv.displayName(), SemanticColor.BOT)) {
                 try {
-                    LiskovFs.get().drives().transfer(drive, relPath, onlineSrv, "");
-                    MubWidgets.ToastHost.push("Copied to " + onlineSrv.displayName(), SemanticColor.BOT);
+                    var res = LiskovFs.get().drives().transfer(drive, relPath, onlineSrv, "");
+                    String dstRel = safeRel(onlineSrv, res.destination());
+                    LiskovSyncClient.get().publishPath(null, res.destination(), dstRel, ft.id(),
+                            playerUuid(), playerName(), "Uploaded from LOCAL", false);
+                    MubWidgets.ToastHost.push("Uploaded to " + onlineSrv.displayName(), SemanticColor.BOT);
                 } catch (Exception e) {
                     MubWidgets.ToastHost.push(e.getMessage(), SemanticColor.DANGER);
                 }
             }
-            MubWidgets.tooltip("Copy to Server Drive", "Keep local copy intact and copy onto the active server drive.");
+            MubWidgets.tooltip("Copy to Server Drive", "Keep local copy intact and upload onto the active server drive.");
         } else {
             if (MubWidgets.termButton("COPY -> LOCAL", SemanticColor.PLAYER)) {
                 try {
@@ -420,6 +433,10 @@ final class InspectorPane {
         if (!offline && !win.viewingTrash && MubWidgets.termButton("TRASH (Del)", SemanticColor.DANGER)) {
             try {
                 trash.moveToTrash(file, ft.id());
+                if (!drive.isLocal()) {
+                    LiskovSyncClient.get().requestDelete(
+                            LiskovSyncClient.get().findFolderIdForRepo(drive.driveId(), repoId), repoId);
+                }
                 win.selectedPath = null;
                 win.multiSelection.remove(file);
                 MubWidgets.ToastHost.push("Moved to .trash/ (recoverable)", SemanticColor.DANGER);
@@ -471,6 +488,14 @@ final class InspectorPane {
                 } catch (Exception ignored) {}
             }
             MubWidgets.tooltip("Prune Old Autosaves", "Delete non-milestone autosaves older than 30 days (keeps >= 10 latest).");
+            if (!drive.isLocal()) {
+                ImGui.sameLine();
+                if (MubWidgets.termButton("SYNC SERVER", SemanticColor.BOT)) {
+                    LiskovSyncClient.get().requestHistory(repoId);
+                    MubWidgets.ToastHost.push("Requested server version history", SemanticColor.BOT);
+                }
+                MubWidgets.tooltip("Sync Remote History", "Fetch commit history for this file from the connected server.");
+            }
         }
 
         if (showBranches) {
@@ -564,8 +589,12 @@ final class InspectorPane {
             DriveMount onlineSrv = activeOnlineServer();
             if (onlineSrv != null && MubWidgets.termButton("COPY -> " + onlineSrv.displayName(), SemanticColor.BOT)) {
                 try {
-                    LiskovFs.get().drives().transfer(drive, relPath, onlineSrv, "");
-                    MubWidgets.ToastHost.push("Copied to " + onlineSrv.displayName(), SemanticColor.BOT);
+                    var res = LiskovFs.get().drives().transfer(drive, relPath, onlineSrv, "");
+                    String dstRel = safeRel(onlineSrv, res.destination());
+                    String ftId = LiskovFs.get().fileTypes().detect(res.destination()).id();
+                    LiskovSyncClient.get().publishPath(null, res.destination(), dstRel, ftId,
+                            playerUuid(), playerName(), "Uploaded from LOCAL", false);
+                    MubWidgets.ToastHost.push("Uploaded to " + onlineSrv.displayName(), SemanticColor.BOT);
                 } catch (Exception e) {
                     MubWidgets.ToastHost.push(e.getMessage(), SemanticColor.DANGER);
                 }
@@ -577,21 +606,46 @@ final class InspectorPane {
         MubTheme.textColored(MubTheme.GUTTER, "Server UUID: " + drive.driveId());
         ImGui.separator();
 
+        String folderId = LiskovSyncClient.get().findFolderIdForRepo(drive.driveId(), repoId);
         SyncWire.RepoEntry entry = findServerEntry(drive.driveId(), repoId);
         if (entry != null && entry.lock != null && entry.lock.locked) {
             MubWidgets.termBadge("LOCKED BY " + entry.lock.lockedByName, SemanticColor.DANGER);
             MubTheme.textColored(MubTheme.DIM, entry.lock.lockReason);
             if (!offline && MubWidgets.termButton("UNLOCK / OP OVERRIDE", SemanticColor.DANGER)) {
                 unlockTargetRepoId = repoId;
-                unlockTargetFolderId = entry.folderId != null ? entry.folderId : "shared";
+                unlockTargetFolderId = folderId;
                 lockConfirmBuf.set("");
                 showUnlockPopup = true;
             }
         } else if (!offline) {
             if (MubWidgets.termButton("LOCK FILE (AUTHOR)", SemanticColor.WARN)) {
-                LiskovSyncClient.get().requestLockToggle("shared", repoId, true, "Locked from Liskov Inspector", "");
+                LiskovSyncClient.get().requestLockToggle(folderId, repoId, true, "Locked from Liskov Inspector", "");
             }
             MubWidgets.tooltip("Lock File", "Prevent teammates from overwriting this file until unlocked.");
+        }
+
+        if (!offline) {
+            ImGui.separator();
+            MubWidgets.sectionHeader("ACL PERMISSIONS");
+            ImGui.setNextItemWidth(Math.max(120f, ImGui.getContentRegionAvailX()));
+            ImGui.inputTextWithHint("##acl_subj", "Player UUID, @team, or *", aclSubjectBuf);
+            MubWidgets.tooltip("ACL Subject", "Enter a player UUID, @teamname, or * for server-wide default.");
+            for (AclRole r : new AclRole[]{ AclRole.VIEW, AclRole.EDIT, AclRole.ADMIN, AclRole.NONE }) {
+                if (r != AclRole.VIEW) ImGui.sameLine();
+                SemanticColor tone = switch (r) {
+                    case ADMIN -> SemanticColor.FOCUS;
+                    case EDIT -> SemanticColor.MR;
+                    case VIEW -> SemanticColor.PLAYER;
+                    case NONE -> SemanticColor.DANGER;
+                };
+                if (MubWidgets.termButton(r.name() + "##acl_" + r.name(), tone) && !aclSubjectBuf.get().isBlank()) {
+                    String raw = aclSubjectBuf.get().trim();
+                    boolean isTeam = raw.startsWith("@");
+                    String subj = isTeam ? raw.substring(1) : raw;
+                    LiskovSyncClient.get().requestAclMutate(repoId, subj, "", isTeam, r);
+                    MubWidgets.ToastHost.push("Sent ACL update: " + raw + " -> " + r.name(), tone);
+                }
+            }
         }
     }
 
@@ -619,11 +673,12 @@ final class InspectorPane {
             DriveMount drive, String relPath, String repoId, String ftId,
             String msg, boolean milestone, byte[] bytes, VcsStore vcs
     ) throws Exception {
+        Map<String, byte[]> files = Map.of(Path.of(relPath).getFileName().toString(), bytes);
         VcsCommit c = vcs.snapshot(
-                drive.driveId(), repoId, playerUuid(), playerName(), msg, milestone, false,
-                Map.of(Path.of(relPath).getFileName().toString(), bytes));
+                drive.driveId(), repoId, playerUuid(), playerName(), msg, milestone, false, files);
         if (!drive.isLocal() && !drive.isOffline()) {
-            LiskovSyncClient.get().pushCommit("shared", relPath, ftId, c, Map.of());
+            String folderId = LiskovSyncClient.get().findFolderIdForRepo(drive.driveId(), repoId);
+            LiskovSyncClient.get().pushCommit(folderId, relPath, ftId, c, files);
         }
         return c;
     }
@@ -634,6 +689,11 @@ final class InspectorPane {
             writeSingleOrBundle(file, res.files());
             previewCommitId = null;
             previewCommit = null;
+            if (!drive.isLocal() && !drive.isOffline()) {
+                String folderId = LiskovSyncClient.get().findFolderIdForRepo(drive.driveId(), repoId);
+                String ftId = LiskovFs.get().fileTypes().detect(file).id();
+                LiskovSyncClient.get().pushCommit(folderId, relPath, ftId, res.commit(), res.files());
+            }
             LiskovReloadBus.fireReload(new LiskovReloadBus.ReloadNotice(
                     drive.driveId(), relPath, res.commit().versionNum, playerName()));
             MubWidgets.ToastHost.push("Restored as v" + res.commit().versionNum, SemanticColor.MR);

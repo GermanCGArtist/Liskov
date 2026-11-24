@@ -85,5 +85,33 @@ class AclLockGuardServerStoreTest {
         assertFalse(reopened.mutateLock("u-op", "Admin", true, lockReq).allowed());
         lockReq.confirmUnlockText = "UNLOCK";
         assertTrue(reopened.mutateLock("u-op", "Admin", true, lockReq).allowed());
+
+        // Folder creation, rename, revert, and delete
+        SyncWire.FolderMutateBody fm = new SyncWire.FolderMutateBody();
+        fm.action = "CREATE";
+        fm.folderId = "railways";
+        fm.name = "Railways";
+        assertTrue(reopened.mutateFolder("u-julian", "Julian", false, fm).ok());
+
+        VcsCommit c2 = new VcsCommit();
+        c2.commitId = "c2";
+        c2.versionNum = 2;
+        c2.branch = "main";
+        c2.message = "v2 update";
+        c2.tree = Map.of("keep.litematic", sha);
+        push.commit = c2;
+        assertTrue(reopened.acceptCommit("u-julian", "Julian", false, push).ok());
+
+        var reverted = reopened.revertRepo("u-julian", "Julian", false, "shared", repoId, "c1");
+        assertTrue(reverted.ok());
+        assertEquals(3, reverted.updated().entry.versionNum);
+
+        var renamed = reopened.renameRepo("u-julian", false, "shared", repoId, "castle/citadel.litematic");
+        assertTrue(renamed.ok());
+        String renamedId = VcsStore.repoIdFor("castle/citadel.litematic");
+        assertEquals(renamedId, renamed.updated().entry.repoId);
+
+        assertTrue(reopened.deleteRepo("u-julian", false, "shared", renamedId).ok());
+        assertTrue(reopened.loadFolder("shared").entries.isEmpty());
     }
 }

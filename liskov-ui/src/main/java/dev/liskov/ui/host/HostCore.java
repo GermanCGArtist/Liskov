@@ -42,6 +42,7 @@ public final class HostCore {
     private static RpRenderer renderer;
 
     private static boolean cursorCaptured;
+    private static volatile float[] lastDockedViewport;
     private static LiskovUiHost.Cursor cursorRequest;
     private static final long[] STD_CURSORS = new long[LiskovUiHost.Cursor.values().length];
 
@@ -170,6 +171,54 @@ public final class HostCore {
 
     static double cursorX() { return cursorCaptured ? virtualX : mouseX; }
     static double cursorY() { return cursorCaptured ? virtualY : mouseY; }
+    public static double lastMouseX() { return mouseX; }
+    public static double lastMouseY() { return mouseY; }
+    static boolean isBackendSupported() { return !disabled; }
+
+    public static boolean blocksMouseGrab() {
+        if (cursorCaptured) return true;
+        for (UiLayer l : visibleLayers()) {
+            try {
+                if (l.blocksMouseGrab()) return true;
+            } catch (Throwable t) {
+                fail(l, t);
+            }
+        }
+        return false;
+    }
+
+    public static boolean isDockedViewportActive() {
+        float[] vp = lastDockedViewport;
+        return vp != null && vp.length == 4 && vp[2] > 1f && vp[3] > 1f;
+    }
+
+    public static double remapMouseX(double screenX) {
+        float[] vp = lastDockedViewport;
+        Minecraft mc = Minecraft.getInstance();
+        if (vp == null || vp.length != 4 || vp[2] <= 1f || mc == null || mc.getWindow() == null) return screenX;
+        double sw = Math.max(1, mc.getWindow().getScreenWidth());
+        double norm = Math.max(0.0, Math.min(1.0, (screenX - vp[0]) / vp[2]));
+        return norm * sw;
+    }
+
+    public static double remapMouseY(double screenY) {
+        float[] vp = lastDockedViewport;
+        Minecraft mc = Minecraft.getInstance();
+        if (vp == null || vp.length != 4 || vp[3] <= 1f || mc == null || mc.getWindow() == null) return screenY;
+        double sh = Math.max(1, mc.getWindow().getScreenHeight());
+        double norm = Math.max(0.0, Math.min(1.0, (screenY - vp[1]) / vp[3]));
+        return norm * sh;
+    }
+
+    static void notifyResourcesReload() {
+        for (UiLayer l : LAYERS) {
+            try {
+                l.onResourcesReload();
+            } catch (Throwable t) {
+                fail(l, t);
+            }
+        }
+    }
 
     public static void renderFrame() {
         if (disabled || LAYERS.isEmpty()) return;
@@ -307,6 +356,7 @@ public final class HostCore {
         }
 
         ImGui.render();
+        lastDockedViewport = dockedVp;
         renderer.render(mc, ImGui.getDrawData(), dockedVp);
     }
 

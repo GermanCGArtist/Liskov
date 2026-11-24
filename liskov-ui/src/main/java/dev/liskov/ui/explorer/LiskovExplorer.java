@@ -227,6 +227,11 @@ public final class LiskovExplorer implements UiLayer {
     }
 
     @Override
+    public boolean blocksMouseGrab() {
+        return visible();
+    }
+
+    @Override
     public boolean wantsKey(int key, int scancode, int action, int mods) {
         return open || FilePickerModal.isOpen() || MubWidgets.CommandPalette.isOpen() || LiskovUiHost.imguiWantsKeyboard();
     }
@@ -984,10 +989,14 @@ public final class LiskovExplorer implements UiLayer {
             boolean submit = ImGui.inputText("##rename_in", win.renameBuf, imgui.flag.ImGuiInputTextFlags.EnterReturnsTrue);
             if (submit || MubWidgets.termButton("RENAME", SemanticColor.FOCUS)) {
                 String next = LiskovPaths.safeName(win.renameBuf.get());
+                String oldRel = safeRel(drive, win.renamingPath);
                 Path target = win.renamingPath.resolveSibling(next);
                 try {
                     if (!target.equals(win.renamingPath)) {
                         Files.move(win.renamingPath, target);
+                        if (!drive.isLocal() && !drive.isOffline() && !oldRel.isEmpty()) {
+                            LiskovSyncClient.get().requestRename(null, VcsStore.repoIdFor(oldRel), safeRel(drive, target));
+                        }
                         win.selectedPath = target;
                         win.multiSelection.remove(win.renamingPath);
                         win.multiSelection.add(target);
@@ -1178,6 +1187,12 @@ public final class LiskovExplorer implements UiLayer {
                     Path dst = dstDir.resolve(unique);
                     if (Files.isDirectory(src)) LiskovPaths.copyDirectoryOverwrite(src, dst);
                     else Files.copy(src, dst);
+                    if (!dstDrive.isLocal() && !dstDrive.isOffline()) {
+                        String dstRel = safeRel(dstDrive, dst);
+                        String ftId = LiskovFs.get().fileTypes().detect(dst).id();
+                        LiskovSyncClient.get().publishPath(dstFolderRel, dst, dstRel, ftId,
+                                playerUuid(), playerName(), "Pasted onto server drive", false);
+                    }
                 }
                 ok++;
             } catch (Exception ignored) {}
@@ -1193,10 +1208,15 @@ public final class LiskovExplorer implements UiLayer {
         List<Path> sel = new ArrayList<>(win.multiSelection);
         if (sel.isEmpty() && win.selectedPath != null) sel.add(win.selectedPath);
         if (sel.isEmpty()) return;
+        DriveMount drive = fs.drives().get(win.driveId);
         int ok = 0;
         for (Path p : sel) {
             try {
+                String rel = drive != null ? safeRel(drive, p) : "";
                 trash.moveToTrash(p, fs.fileTypes().detect(p).id());
+                if (drive != null && !drive.isLocal() && !drive.isOffline() && !rel.isEmpty()) {
+                    LiskovSyncClient.get().requestDelete(null, VcsStore.repoIdFor(rel));
+                }
                 ok++;
             } catch (Exception ignored) {}
         }
@@ -1237,6 +1257,12 @@ public final class LiskovExplorer implements UiLayer {
                     for (String rel : dp.relativePaths()) {
                         try {
                             lastRes = LiskovFs.get().drives().transfer(srcDrive, rel, dstDrive, dstFolderRel);
+                            if (!dstDrive.isLocal() && !dstDrive.isOffline()) {
+                                String dstRel = safeRel(dstDrive, lastRes.destination());
+                                String ftId = LiskovFs.get().fileTypes().detect(lastRes.destination()).id();
+                                LiskovSyncClient.get().publishPath(dstFolderRel, lastRes.destination(), dstRel, ftId,
+                                        playerUuid(), playerName(), "Uploaded via drag & drop", false);
+                            }
                             ok++;
                         } catch (Exception e) {
                             MubWidgets.ToastHost.push(e.getMessage(), SemanticColor.WARN);
@@ -1327,5 +1353,15 @@ public final class LiskovExplorer implements UiLayer {
             if (ImGui.calcTextSize(cand).x <= maxWidth) return cand;
         }
         return "...";
+    }
+
+    private static String playerUuid() {
+        Minecraft mc = Minecraft.getInstance();
+        return mc != null && mc.player != null ? mc.player.getUUID().toString() : "local";
+    }
+
+    private static String playerName() {
+        Minecraft mc = Minecraft.getInstance();
+        return mc != null && mc.player != null ? mc.player.getGameProfile().name() : "Player";
     }
 }

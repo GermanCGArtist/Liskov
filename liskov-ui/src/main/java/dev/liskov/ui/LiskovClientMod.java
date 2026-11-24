@@ -70,6 +70,7 @@ public final class LiskovClientMod implements ClientModInitializer {
 
         MubTheme.loadFromDisk();
         LiskovSyncClient.get().initClientNetworking();
+        LiskovSyncClient.get().setErrorListener(msg -> MubWidgets.ToastHost.push("Sync error: " + msg, SemanticColor.DANGER));
         LiskovExplorer.get().init(WATCHER);
 
         LiskovUiHost.register(MenuOverviewRegistry.get());

@@ -1,6 +1,18 @@
-# Liskov `0.1.0+mc26.3` Gaps & `v0.1.1` Follow-ups
+# Liskov Gaps & Status Tracker (`0.2.0+mc26.3`)
 
-Technical audit of missing hooks, input/keycode bugs, incomplete sync flows, and cross-mod rough edges discovered while mapping **Vitruvius** (`f:\workflow\Vitruvius`) and **Manhattan** (`f:\workflow\Manhattan`) onto Liskov `0.1.0+mc26.3`.
+Technical audit of missing hooks, input/keycode bugs, incomplete sync flows, and cross-mod rough edges discovered while mapping **Vitruvius** (`f:\workflow\Vitruvius`) and **Manhattan** (`f:\workflow\Manhattan`) onto Liskov.
+
+## Resolution Status (`0.2.0+mc26.3`)
+
+| # | Item | Status | Resolved In |
+|---|---|---|---|
+| 1 | `KeyMapping` SDL scancode (`InputConstants.KEY_F8`) & `en_us.json` | **RESOLVED** | `0.1.1+mc26.3` |
+| 2 | Global `Ctrl+P`, `HostCore.onKey` layer short-circuit, modifiers & repeat | **RESOLVED** | `0.1.1+mc26.3` / `0.2.0+mc26.3` |
+| 3 | Mouse-grab blocking (`UiLayer.blocksMouseGrab()`) & docked viewport remapping | **RESOLVED** | `0.2.0+mc26.3` |
+| 4 | End-to-end `LiskovSyncClient` (`publishPath`, history, ACL, delete/rename/folder CRUD) & CLI | **RESOLVED** | `0.2.0+mc26.3` |
+| 4b | Automatic `VcsStore` autosave dedup + retention pruning + blob GC | **RESOLVED** | `0.2.0+mc26.3` |
+| 5 | Extension renames vs unmodified mod readers | **COORDINATED** | Vitruvius/Manhattan updates |
+| 6 | `/liskov` CLI parity (`acl set`, `lock`, `unlock`, `history`, `revert`) | **RESOLVED** | `0.2.0+mc26.3` |
 
 ---
 

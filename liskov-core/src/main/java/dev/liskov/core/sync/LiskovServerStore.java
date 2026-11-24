@@ -342,7 +342,9 @@ public final class LiskovServerStore {
             return false;
         }
         AclGroup g = aclConfig.getOrCreatePolicy(targetId, actorUuid, "");
-        if (isTeam) {
+        if ("*".equals(subjectUuid)) {
+            g.defaultRole = role;
+        } else if (isTeam) {
             g.groupRoles.put(subjectUuid, role);
         } else {
             g.memberRoles.put(subjectUuid, role);
@@ -356,5 +358,233 @@ public final class LiskovServerStore {
 
     public synchronized List<VcsCommit> historyOf(String repoId) {
         return vcs.loadCommits(identity.serverId, repoId);
+    }
+
+    public synchronized String findFolderIdOfRepo(String repoId) {
+        if (repoId == null || repoId.isBlank() || !Files.isDirectory(sharedFoldersDir)) {
+            return DEFAULT_FOLDER_ID;
+        }
+        try (Stream<Path> dirs = Files.list(sharedFoldersDir)) {
+            for (Path dir : dirs.filter(Files::isDirectory).toList()) {
+                SyncWire.FolderSummary fs = loadFolder(dir.getFileName().toString());
+                if (fs == null) continue;
+                for (SyncWire.RepoEntry e : fs.entries) {
+                    if (repoId.equals(e.repoId)) return fs.folderId;
+                }
+            }
+        } catch (IOException ignored) {
+        }
+        return DEFAULT_FOLDER_ID;
+    }
+
+    public record DeleteOutcome(boolean ok, String error, SyncWire.RepoDeletedBody deleted) {}
+    public record FolderOutcome(boolean ok, String error, SyncWire.FolderSummary folder) {}
+
+    public synchronized DeleteOutcome deleteRepo(
+            String actorUuid,
+            boolean isOp,
+            String folderId,
+            String repoId
+    ) throws IOException {
+        if (repoId == null || repoId.isBlank()) {
+            return new DeleteOutcome(false, "Missing repoId.", null);
+        }
+        String fid = (folderId == null || folderId.isBlank()) ? findFolderIdOfRepo(repoId) : LiskovPaths.safeName(folderId);
+        if (!AccessEvaluator.canEdit(aclConfig, fid, actorUuid, isOp)
+                || !AccessEvaluator.canEdit(aclConfig, repoId, actorUuid, isOp)) {
+            return new DeleteOutcome(false, "Permission denied: EDIT role required.", null);
+        }
+        SyncWire.FolderSummary folder = loadFolder(fid);
+        if (folder == null) return new DeleteOutcome(false, "Folder not found: " + fid, null);
+        if (folder.lock != null && folder.lock.locked && !LockGuard.canModify(folder.lock, actorUuid)) {
+            return new DeleteOutcome(false, "Folder '" + folder.name + "' is locked.", null);
+        }
+        SyncWire.RepoEntry target = null;
+        for (SyncWire.RepoEntry e : folder.entries) {
+            if (repoId.equals(e.repoId)) {
+                target = e;
+                break;
+            }
+        }
+        if (target == null) return new DeleteOutcome(false, "Item not found.", null);
+        if (target.lock != null && target.lock.locked && !LockGuard.canModify(target.lock, actorUuid)) {
+            return new DeleteOutcome(false, "Item is locked by " + target.lock.lockedByName + ".", null);
+        }
+        folder.entries.remove(target);
+        saveFolderIndex(fid, folder.entries);
+
+        SyncWire.RepoDeletedBody body = new SyncWire.RepoDeletedBody();
+        body.serverId = identity.serverId;
+        body.folderId = fid;
+        body.repoId = repoId;
+        body.relativePath = target.relativePath;
+        return new DeleteOutcome(true, "", body);
+    }
+
+    public synchronized PushOutcome renameRepo(
+            String actorUuid,
+            boolean isOp,
+            String folderId,
+            String repoId,
+            String newRelativePath
+    ) throws IOException {
+        if (repoId == null || repoId.isBlank() || newRelativePath == null || newRelativePath.isBlank()) {
+            return new PushOutcome(false, "Missing repoId or new path.", null);
+        }
+        String cleanNewPath = newRelativePath.replace('\\', '/');
+        String fid = (folderId == null || folderId.isBlank()) ? findFolderIdOfRepo(repoId) : LiskovPaths.safeName(folderId);
+        if (!AccessEvaluator.canEdit(aclConfig, fid, actorUuid, isOp)
+                || !AccessEvaluator.canEdit(aclConfig, repoId, actorUuid, isOp)) {
+            return new PushOutcome(false, "Permission denied: EDIT role required.", null);
+        }
+        SyncWire.FolderSummary folder = loadFolder(fid);
+        if (folder == null) return new PushOutcome(false, "Folder not found: " + fid, null);
+        SyncWire.RepoEntry target = null;
+        for (SyncWire.RepoEntry e : folder.entries) {
+            if (repoId.equals(e.repoId)) {
+                target = e;
+                break;
+            }
+        }
+        if (target == null) return new PushOutcome(false, "Item not found.", null);
+        if (target.lock != null && target.lock.locked && !LockGuard.canModify(target.lock, actorUuid)) {
+            return new PushOutcome(false, "Item is locked by " + target.lock.lockedByName + ".", null);
+        }
+        String newRepoId = VcsStore.repoIdFor(cleanNewPath);
+        for (SyncWire.RepoEntry e : folder.entries) {
+            if (!repoId.equals(e.repoId) && newRepoId.equals(e.repoId)) {
+                return new PushOutcome(false, "Target path already exists on server.", null);
+            }
+        }
+        if (!newRepoId.equals(repoId)) {
+            List<VcsCommit> oldCommits = vcs.loadCommits(identity.serverId, repoId);
+            for (int i = oldCommits.size() - 1; i >= 0; i--) {
+                vcs.acceptRemoteCommit(identity.serverId, newRepoId, oldCommits.get(i), i == 0);
+            }
+            AclGroup oldPolicy = aclConfig.policies.remove(repoId);
+            if (oldPolicy != null) {
+                oldPolicy.id = newRepoId;
+                aclConfig.policies.put(newRepoId, oldPolicy);
+                saveAcl();
+            }
+        }
+        target.repoId = newRepoId;
+        target.relativePath = cleanNewPath;
+        saveFolderIndex(fid, folder.entries);
+
+        SyncWire.RepoUpdatedBody upd = new SyncWire.RepoUpdatedBody();
+        upd.serverId = identity.serverId;
+        upd.entry = target;
+        List<VcsCommit> cur = vcs.loadCommits(identity.serverId, newRepoId);
+        upd.commit = cur.isEmpty() ? null : cur.get(0);
+        return new PushOutcome(true, "", upd);
+    }
+
+    public synchronized FolderOutcome mutateFolder(
+            String actorUuid,
+            String actorName,
+            boolean isOp,
+            SyncWire.FolderMutateBody req
+    ) throws IOException {
+        if (req == null || req.action == null || req.folderId == null || req.folderId.isBlank()) {
+            return new FolderOutcome(false, "Invalid folder request.", null);
+        }
+        String fid = LiskovPaths.safeName(req.folderId);
+        String act = req.action.trim().toUpperCase();
+        if ("CREATE".equals(act)) {
+            SyncWire.FolderSummary existing = loadFolder(fid);
+            if (existing != null) return new FolderOutcome(true, "", existing);
+            SyncWire.FolderSummary fs = new SyncWire.FolderSummary();
+            fs.folderId = fid;
+            fs.name = (req.name == null || req.name.isBlank()) ? fid : req.name.strip();
+            fs.colorRole = (req.colorRole == null || req.colorRole.isBlank()) ? "focus" : req.colorRole;
+            fs.ownerUuid = actorUuid == null ? "" : actorUuid;
+            fs.ownerName = actorName == null ? "" : actorName;
+            saveFolderMeta(fs);
+            aclConfig.getOrCreatePolicy(fid, fs.ownerUuid, fs.ownerName);
+            saveAcl();
+            return new FolderOutcome(true, "", loadFolder(fid));
+        }
+
+        SyncWire.FolderSummary fs = loadFolder(fid);
+        if (fs == null) return new FolderOutcome(false, "Folder not found: " + fid, null);
+
+        if ("DELETE".equals(act)) {
+            if (DEFAULT_FOLDER_ID.equals(fid)) {
+                return new FolderOutcome(false, "Cannot delete default shared folder.", null);
+            }
+            if (!AccessEvaluator.canAdmin(aclConfig, fid, actorUuid, isOp)) {
+                return new FolderOutcome(false, "Permission denied: ADMIN role required.", null);
+            }
+            LiskovPaths.deleteRecursive(sharedFoldersDir.resolve(fid));
+            aclConfig.policies.remove(fid);
+            saveAcl();
+            return new FolderOutcome(true, "", null);
+        }
+
+        if (!AccessEvaluator.canEdit(aclConfig, fid, actorUuid, isOp)) {
+            return new FolderOutcome(false, "Permission denied: EDIT role required.", null);
+        }
+        switch (act) {
+            case "RENAME" -> {
+                if (req.name != null && !req.name.isBlank()) fs.name = req.name.strip();
+                if (req.colorRole != null && !req.colorRole.isBlank()) fs.colorRole = req.colorRole;
+            }
+            case "ARCHIVE" -> fs.archived = true;
+            case "UNARCHIVE" -> fs.archived = false;
+            default -> {
+                return new FolderOutcome(false, "Unknown folder action: " + req.action, null);
+            }
+        }
+        saveFolderMeta(fs);
+        return new FolderOutcome(true, "", loadFolder(fid));
+    }
+
+    public synchronized PushOutcome revertRepo(
+            String actorUuid,
+            String actorName,
+            boolean isOp,
+            String folderId,
+            String repoId,
+            String targetCommitId
+    ) throws IOException {
+        if (repoId == null || repoId.isBlank() || targetCommitId == null || targetCommitId.isBlank()) {
+            return new PushOutcome(false, "Missing repoId or commitId.", null);
+        }
+        String fid = (folderId == null || folderId.isBlank()) ? findFolderIdOfRepo(repoId) : LiskovPaths.safeName(folderId);
+        if (!AccessEvaluator.canEdit(aclConfig, fid, actorUuid, isOp)
+                || !AccessEvaluator.canEdit(aclConfig, repoId, actorUuid, isOp)) {
+            return new PushOutcome(false, "Permission denied: EDIT role required.", null);
+        }
+        SyncWire.FolderSummary folder = loadFolder(fid);
+        if (folder == null) return new PushOutcome(false, "Folder not found: " + fid, null);
+        SyncWire.RepoEntry target = null;
+        for (SyncWire.RepoEntry e : folder.entries) {
+            if (repoId.equals(e.repoId)) {
+                target = e;
+                break;
+            }
+        }
+        if (target == null) return new PushOutcome(false, "Item not found.", null);
+        if (target.lock != null && target.lock.locked && !LockGuard.canModify(target.lock, actorUuid)) {
+            return new PushOutcome(false, "Item is locked by " + target.lock.lockedByName + ".", null);
+        }
+
+        VcsStore.RestoreOutput restored = vcs.restore(identity.serverId, repoId, targetCommitId, actorUuid, actorName);
+        long totalSize = 0L;
+        for (byte[] b : restored.files().values()) totalSize += b.length;
+
+        target.versionNum = restored.commit().versionNum;
+        target.headCommitId = restored.commit().commitId;
+        target.updatedAtMs = restored.commit().timestampMs;
+        target.sizeBytes = totalSize;
+        target.tree = new LinkedHashMap<>(restored.commit().tree);
+        saveFolderIndex(fid, folder.entries);
+
+        SyncWire.RepoUpdatedBody upd = new SyncWire.RepoUpdatedBody();
+        upd.serverId = identity.serverId;
+        upd.entry = target;
+        upd.commit = restored.commit();
+        return new PushOutcome(true, "", upd);
     }
 }
