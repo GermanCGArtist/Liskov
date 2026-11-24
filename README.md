@@ -31,3 +31,12 @@ Drop `liskov-0.1.0+mc26.3.jar` into the `mods/` directory on your Fabric client 
 - **Linux / macOS (JDK 25):** `./gradlew test build`
 
 Output universal mod JAR: `liskov-ui/build/libs/liskov-<version>.jar`
+
+## Documentation
+
+- [Documentation Hub](file:///f:/workflow/Liskov/docs/README.md) — Reading order and overview for mod authors and contributors
+- [System Architecture](file:///f:/workflow/Liskov/docs/ARCHITECTURE.md) — 3-module split, Jar-in-Jar packaging, Drives filesystem, `.liskov-vcs/`, `liskov:sync`, ACLs, and `LiskovUiHost`
+- [API Reference](file:///f:/workflow/Liskov/docs/API_REFERENCE.md) — Verified class-by-class reference for `:liskov-core`, `:liskov-net`, and `:liskov-ui`
+- [Migrating Vitruvius](file:///f:/workflow/Liskov/docs/MIGRATING_VITRUVIUS.md) — File-by-file transition guide for Vitruvius (`cg-uihost`, project/schematic I/O, sync, registries)
+- [Migrating Manhattan](file:///f:/workflow/Liskov/docs/MIGRATING_MANHATTAN.md) — File-by-file transition guide for Manhattan (ImGui host, `MubTheme`/`MubWidgets`, storage migration, fleet/sync)
+- [Gaps & Follow-ups](file:///f:/workflow/Liskov/docs/GAPS_AND_FOLLOWUPS.md) — Prioritized (`P0`/`P1`/`P2`) audit of missing hooks and `v0.1.1` follow-up items
