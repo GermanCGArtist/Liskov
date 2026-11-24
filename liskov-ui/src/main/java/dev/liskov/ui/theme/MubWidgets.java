@@ -5,7 +5,9 @@ import dev.liskov.core.SemanticColor;
 import imgui.ImDrawList;
 import imgui.ImGui;
 import imgui.ImVec2;
+import imgui.flag.ImDrawFlags;
 import imgui.flag.ImGuiCol;
+import imgui.flag.ImGuiHoveredFlags;
 import imgui.flag.ImGuiKey;
 import imgui.flag.ImGuiWindowFlags;
 import imgui.type.ImString;
@@ -18,7 +20,7 @@ import java.util.Locale;
 
 /**
  * Shared ModsUndBots terminal UI primitives (0px sharp geometry, 1px borders, 2-letter file monograms,
- * pixel segment bars, dot-grid backdrop, ToastHost, and Ctrl+P CommandPalette).
+ * vector icons safe in ASCII fonts, tooltips, pixel segment bars, dot-grid backdrop, ToastHost, and CommandPalette).
  */
 public final class MubWidgets {
     private MubWidgets() {}
@@ -36,11 +38,90 @@ public final class MubWidgets {
         }
     }
 
+    // ------------------------------------------------------------------ Tooltips & Vector Icons
+
+    public static void tooltip(String text) {
+        if (text == null || text.isEmpty() || !ImGui.isItemHovered(ImGuiHoveredFlags.DelayShort)) return;
+        ImGui.beginTooltip();
+        ImGui.pushTextWrapPos(340f);
+        MubTheme.textColored(MubTheme.FG, text);
+        ImGui.popTextWrapPos();
+        ImGui.endTooltip();
+    }
+
+    public static void tooltip(String title, String detail) {
+        if (!ImGui.isItemHovered(ImGuiHoveredFlags.DelayShort)) return;
+        ImGui.beginTooltip();
+        ImGui.pushTextWrapPos(360f);
+        if (title != null && !title.isEmpty()) MubTheme.textColored(MubTheme.ACCENT, title);
+        if (detail != null && !detail.isEmpty()) MubTheme.textColored(MubTheme.DIM, detail);
+        ImGui.popTextWrapPos();
+        ImGui.endTooltip();
+    }
+
+    public static void folderIcon(int rgb, float size) {
+        float px = ImGui.getCursorScreenPosX();
+        float py = ImGui.getCursorScreenPosY() + 1f;
+        float w = size;
+        float h = Math.max(10f, size * 0.78f);
+        drawFolderIconAt(ImGui.getWindowDrawList(), px, py, w, h, MubTheme.u32(rgb, 0.22f), MubTheme.u32(rgb));
+        ImGui.dummy(w, h + 2f);
+    }
+
+    public static void drawFolderIconAt(ImDrawList dl, float x, float y, float w, float h, int fillCol, int strokeCol) {
+        float tabW = Math.max(5f, w * 0.42f);
+        float tabH = Math.max(3f, h * 0.22f);
+        float bodyY = y + tabH;
+        dl.addRectFilled(x, y, x + tabW, bodyY + 1f, strokeCol);
+        dl.addRectFilled(x, bodyY, x + w, y + h, fillCol);
+        dl.addRect(x, bodyY, x + w, y + h, strokeCol, 0f, 0, 1.2f);
+    }
+
+    public static void drawStarAt(ImDrawList dl, float cx, float cy, float outerR, boolean filled, int col) {
+        float innerR = outerR * 0.45f;
+        float[] px = new float[10];
+        float[] py = new float[10];
+        for (int i = 0; i < 10; i++) {
+            double ang = -Math.PI / 2.0 + i * (Math.PI / 5.0);
+            float r = (i & 1) == 0 ? outerR : innerR;
+            px[i] = cx + (float) (Math.cos(ang) * r);
+            py[i] = cy + (float) (Math.sin(ang) * r);
+        }
+        if (filled) {
+            for (int i = 0; i < 10; i++) {
+                int next = (i + 1) % 10;
+                dl.addTriangleFilled(cx, cy, px[i], py[i], px[next], py[next], col);
+            }
+        } else {
+            for (int i = 0; i < 10; i++) {
+                int next = (i + 1) % 10;
+                dl.addLine(px[i], py[i], px[next], py[next], col, 1.2f);
+            }
+        }
+    }
+
+    public static boolean starButton(String id, boolean filled, SemanticColor activeTone) {
+        SemanticColor tone = filled ? activeTone : SemanticColor.INK_MUTED;
+        boolean clicked = termButton("   ##" + id, tone, 24f, 20f);
+        float x0 = ImGui.getItemRectMinX();
+        float y0 = ImGui.getItemRectMinY();
+        float x1 = ImGui.getItemRectMaxX();
+        float y1 = ImGui.getItemRectMaxY();
+        int col = MubTheme.u32(filled ? MubTheme.colorFor(activeTone) : MubTheme.DIM);
+        drawStarAt(ImGui.getWindowDrawList(), (x0 + x1) * 0.5f, (y0 + y1) * 0.5f, 6f, filled, col);
+        return clicked;
+    }
+
+    public static void drawChevronRightAt(ImDrawList dl, float cx, float cy, float halfSize, int col) {
+        dl.addLine(cx - halfSize * 0.45f, cy - halfSize, cx + halfSize * 0.55f, cy, col, 1.4f);
+        dl.addLine(cx + halfSize * 0.55f, cy, cx - halfSize * 0.45f, cy + halfSize, col, 1.4f);
+    }
+
     // ------------------------------------------------------------------ Sharp Primitives
 
     public static void sectionHeader(String title) {
         MubTheme.push(MubTheme.small());
-        MubTheme.textColored(MubTheme.GUTTER, "── " + title.toUpperCase(Locale.ROOT));
+        MubTheme.textColored(MubTheme.GUTTER, "-- " + title.toUpperCase(Locale.ROOT));
         ImGui.popFont();
     }
 
@@ -67,7 +148,7 @@ public final class MubWidgets {
     }
 
     public static boolean termToggle(String id, String label, boolean current, SemanticColor tone) {
-        String text = (current ? "[×] " : "[ ] ") + label + "##" + id;
+        String text = (current ? "[x] " : "[ ] ") + label + "##" + id;
         return termButton(text, current ? tone : SemanticColor.INK_MUTED);
     }
 

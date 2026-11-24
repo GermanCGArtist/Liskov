@@ -6,6 +6,7 @@ import dev.liskov.ui.host.UiLayer;
 import dev.liskov.ui.theme.MubTheme;
 import dev.liskov.ui.theme.MubWidgets;
 import imgui.ImGui;
+import imgui.flag.ImGuiCond;
 import imgui.flag.ImGuiWindowFlags;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.PauseScreen;
@@ -71,13 +72,13 @@ public final class MenuOverviewRegistry implements UiLayer {
 
     @Override
     public boolean visible() {
-        return activeSurface() != null && !providers.isEmpty();
+        return MubTheme.config().showMenuOverview && activeSurface() != null && !providers.isEmpty();
     }
 
     @Override
     public void draw() {
         Surface surface = activeSurface();
-        if (surface == null) return;
+        if (surface == null || !MubTheme.config().showMenuOverview) return;
         List<CardProvider> matching;
         synchronized (this) {
             matching = providers.stream().filter(p -> p.supports(surface)).toList();
@@ -86,9 +87,9 @@ public final class MenuOverviewRegistry implements UiLayer {
 
         var vp = ImGui.getMainViewport();
         float cardW = 300f * LiskovUiHost.scale();
-        ImGui.setNextWindowPos(vp.getPosX() + vp.getSizeX() - cardW - 18f, vp.getPosY() + 18f);
+        ImGui.setNextWindowPos(vp.getPosX() + vp.getSizeX() - cardW - 18f, vp.getPosY() + 18f, ImGuiCond.FirstUseEver);
         ImGui.setNextWindowSize(cardW, 0f);
-        int flags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove
+        int flags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize
                 | ImGuiWindowFlags.AlwaysAutoResize | ImGuiWindowFlags.NoSavedSettings;
         if (ImGui.begin("##LiskovMenuOverview", flags)) {
             boolean open = surface == Surface.TITLE_SCREEN
@@ -105,6 +106,14 @@ public final class MenuOverviewRegistry implements UiLayer {
                         else MubTheme.config().pauseOverviewOpen = open;
                         MubTheme.saveToDisk();
                     }
+                    MubWidgets.tooltip("Collapse / Expand Card", "Toggle card body visibility on this screen.");
+                    ImGui.sameLine();
+                    if (MubWidgets.termButton("HIDE##ov_hide", SemanticColor.INK_MUTED)) {
+                        MubTheme.config().showMenuOverview = false;
+                        MubTheme.saveToDisk();
+                        MubWidgets.ToastHost.push("Menu card hidden (re-enable via Explorer [MENU CARD] or Ctrl+P)", SemanticColor.INK_MUTED);
+                    }
+                    MubWidgets.tooltip("Hide Menu Card", "Hide this card on Title & Pause menus (re-enable in Liskov Explorer or Ctrl+P).");
                 } else {
                     MubWidgets.sectionHeader(cp.title());
                 }

@@ -2,10 +2,12 @@ package dev.liskov.ui.host;
 
 import com.mojang.blaze3d.platform.Window;
 import dev.liskov.core.LiskovFs;
+import dev.liskov.ui.explorer.LiskovExplorer;
 import dev.liskov.ui.theme.MubTheme;
 import imgui.ImGui;
 import imgui.ImGuiIO;
 import imgui.flag.ImGuiConfigFlags;
+import imgui.flag.ImGuiKey;
 import imgui.flag.ImGuiMouseCursor;
 import imgui.internal.ImGuiContext;
 import net.fabricmc.loader.api.FabricLoader;
@@ -338,14 +340,28 @@ public final class HostCore {
     public static boolean onKey(long window, int sdlScancode, int mcAction, int sdlMods) {
         if (sdlScancode >= 0 && sdlScancode < SDL_KEYS_DOWN.length) SDL_KEYS_DOWN[sdlScancode] = mcAction != 0;
         Minecraft mc = Minecraft.getInstance();
-        if (!routing(window, mc)) return false;
+        if (disabled || mc == null || mc.getWindow() == null || window != mc.getWindow().handle()) return false;
         int key = InputMap.glfwKey(sdlScancode), action = InputMap.glfwAction(mcAction), mods = InputMap.glfwMods(sdlMods);
+
+        if (LiskovExplorer.get().handleGlobalKey(key, sdlScancode, action, mods)) {
+            return true;
+        }
+        if (!initialized || visibleLayers().isEmpty()) return false;
+
+        List<UiLayer> layers = visibleLayers();
         boolean wants = anyWantsKey(key, sdlScancode, action, mods);
         ImGui.setCurrentContext(ctx);
+        ImGuiIO io = ImGui.getIO();
+        io.addKeyEvent(ImGuiKey.ModCtrl, (mods & InputMap.GLFW_MOD_CONTROL) != 0);
+        io.addKeyEvent(ImGuiKey.ModShift, (mods & InputMap.GLFW_MOD_SHIFT) != 0);
+        io.addKeyEvent(ImGuiKey.ModAlt, (mods & InputMap.GLFW_MOD_ALT) != 0);
+        io.addKeyEvent(ImGuiKey.ModSuper, (mods & InputMap.GLFW_MOD_SUPER) != 0);
         if (wants || action == InputMap.GLFW_RELEASE) {
             int ik = InputMap.imguiKey(key);
-            if (ik != 0 && action != InputMap.GLFW_REPEAT) ImGui.getIO().addKeyEvent(ik, action == InputMap.GLFW_PRESS);
-            for (UiLayer l : visibleLayers()) {
+            if (ik != 0 && action != InputMap.GLFW_REPEAT) io.addKeyEvent(ik, action == InputMap.GLFW_PRESS);
+            // Dispatch top-most layer first so overlays handle Esc / shortcuts before lower layers
+            for (int i = layers.size() - 1; i >= 0; i--) {
+                UiLayer l = layers.get(i);
                 try {
                     l.onKey(key, sdlScancode, action, mods);
                 } catch (Throwable t) {
@@ -359,7 +375,7 @@ public final class HostCore {
     public static boolean onChar(long window, int codepoint) {
         Minecraft mc = Minecraft.getInstance();
         if (!routing(window, mc)) return false;
-        if (!anyWantsKeyboard()) return false;
+        if (!imguiWantsTextInput() && !anyWantsKeyboard()) return false;
         ImGui.setCurrentContext(ctx);
         ImGui.getIO().addInputCharacter(codepoint);
         return true;

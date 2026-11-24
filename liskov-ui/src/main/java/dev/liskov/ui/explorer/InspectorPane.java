@@ -37,9 +37,9 @@ import java.util.Map;
 
 /**
  * Right-hand Inspector column for {@link LiskovExplorer}:
- * {@code [INSPECT]} (3D preview + Y-slice / inline quick-edit + cross-mod actions),
- * {@code [HISTORY]} (hidden {@code .liskov-vcs/} timeline + optional {@code [×] BRANCHES} + 3D preview of old saves + Restore),
- * and {@code [SHARING & ACL]} (server identity + LockGuard OP {@code "UNLOCK"} modal).
+ * {@code [INSPECT]} (3D preview + Y-layer slice / inline quick-edit + cross-mod actions),
+ * {@code [HISTORY]} (hidden {@code .liskov-vcs/} timeline + {@code BRANCHES} + 3D preview of old saves + Restore),
+ * {@code [SHARING & ACL]}, plus bulk multi-selection actions when multiple files/folders are selected.
  */
 final class InspectorPane {
     private enum Tab { INSPECT, HISTORY, SHARING }
@@ -51,7 +51,7 @@ final class InspectorPane {
     private boolean showBranches = false;
     private boolean editingText = false;
     private Path editingPath;
-    private final ImString editorBuf = new ImString(32 * 1024);
+    private final ImString editorBuf = new ImString(64 * 1024);
     private final ImString branchBuf = new ImString(64);
     private final ImString snapshotNoteBuf = new ImString(128);
     private final ImString lockConfirmBuf = new ImString(32);
@@ -71,8 +71,18 @@ final class InspectorPane {
             TrashManager trash,
             ReloadWatcher watcher
     ) {
+        if (win.multiSelection.size() > 1) {
+            drawMultiSelectionSummary(win, drive, trash);
+            return;
+        }
         if (win.selectedPath == null || !Files.exists(win.selectedPath) || Files.isDirectory(win.selectedPath)) {
-            MubTheme.textColored(MubTheme.GUTTER, "Select a file to inspect its 3D preview, .liskov-vcs/ history, and sharing.");
+            MubTheme.textColored(MubTheme.GUTTER, "Select a file to inspect its 3D preview, history, and sharing.");
+            if (win.selectedPath != null && Files.isDirectory(win.selectedPath)) {
+                ImGui.spacing();
+                MubWidgets.sectionHeader("FOLDER");
+                MubTheme.textColored(MubTheme.FG, win.selectedPath.getFileName().toString());
+                MubTheme.textColored(MubTheme.DIM, "Double-click or press Enter to open.");
+            }
             return;
         }
         Path file = win.selectedPath;
@@ -98,14 +108,20 @@ final class InspectorPane {
         ImGui.sameLine();
         ImGui.beginGroup();
         MubTheme.textColored(MubTheme.FG, file.getFileName().toString());
+        MubWidgets.tooltip(file.toAbsolutePath().normalize().toString());
         VcsHead head = vcs.loadHead(drive.driveId(), repoId);
         MubWidgets.termBadge("v" + Math.max(1, head.latestVersion), SemanticColor.FOCUS);
+        MubWidgets.tooltip("Version", "Latest local .liskov-vcs/ snapshot version.");
         ImGui.sameLine();
         if (drive.isLocal()) {
             MubWidgets.termBadge("LOCAL", SemanticColor.PLAYER);
+            MubWidgets.tooltip("Drive: LOCAL", "Private workspace stored on your computer.");
         } else {
-            MubWidgets.termBadge(cache == CacheState.PINNED_OFFLINE ? "★ KEPT OFFLINE" : "✓ CACHED",
+            MubWidgets.termBadge(cache == CacheState.PINNED_OFFLINE ? "KEPT OFFLINE" : "CACHED",
                     cache == CacheState.PINNED_OFFLINE ? SemanticColor.MR : SemanticColor.BOT);
+            MubWidgets.tooltip("Cache Status", cache == CacheState.PINNED_OFFLINE
+                    ? "Pinned for offline browsing."
+                    : "Downloaded on demand from server drive.");
         }
         CompletionTag tag = FileActionRegistry.statusOf(file, ft);
         if (tag != CompletionTag.NOT_STARTED) {
@@ -116,10 +132,12 @@ final class InspectorPane {
 
         ImGui.sameLine();
         boolean isFav = favs.isFavorite(drive.driveId(), relPath);
-        if (MubWidgets.termButton(isFav ? "★##fav" : "☆##fav", isFav ? SemanticColor.WARN : SemanticColor.INK_MUTED)) {
+        if (MubWidgets.starButton("fav", isFav, SemanticColor.WARN)) {
             favs.toggleFavorite(drive.driveId(), relPath, file.getFileName().toString(), ft.id(), false);
             try { favs.save(fs.favoritesFile()); } catch (Exception ignored) {}
         }
+        MubWidgets.tooltip(isFav ? "Remove Favorite" : "Pin to Favorites",
+                "Pin or unpin this item in the left Favorites sidebar.");
 
         ImGui.separator();
         // 3 Inspector Tabs
@@ -127,15 +145,18 @@ final class InspectorPane {
         if (MubWidgets.termButton("INSPECT", activeTab == Tab.INSPECT ? SemanticColor.FOCUS : SemanticColor.INK_MUTED, tabW, 24f)) {
             activeTab = Tab.INSPECT;
         }
+        MubWidgets.tooltip("Inspect Tab", "3D preview, text editor, materials, and file actions.");
         ImGui.sameLine();
         List<VcsCommit> commits = vcs.loadCommits(drive.driveId(), repoId);
         if (MubWidgets.termButton("HISTORY (" + commits.size() + ")", activeTab == Tab.HISTORY ? SemanticColor.FOCUS : SemanticColor.INK_MUTED, tabW, 24f)) {
             activeTab = Tab.HISTORY;
         }
+        MubWidgets.tooltip("History Tab", "View .liskov-vcs/ save snapshots, branches, and restore older versions.");
         ImGui.sameLine();
         if (MubWidgets.termButton("SHARING", activeTab == Tab.SHARING ? SemanticColor.BOT : SemanticColor.INK_MUTED, tabW, 24f)) {
             activeTab = Tab.SHARING;
         }
+        MubWidgets.tooltip("Sharing & ACL Tab", "Server drive sync status, file locks, and cross-drive copy.");
         ImGui.separator();
 
         switch (activeTab) {
@@ -145,6 +166,98 @@ final class InspectorPane {
         }
 
         drawUnlockModal();
+    }
+
+    private void drawMultiSelectionSummary(ExplorerWindowState win, DriveMount drive, TrashManager trash) {
+        int count = win.multiSelection.size();
+        MubWidgets.termBadge(count + " ITEMS SELECTED", SemanticColor.FOCUS);
+        ImGui.separator();
+
+        long totalBytes = 0L;
+        int files = 0, dirs = 0;
+        for (Path p : win.multiSelection) {
+            if (Files.isDirectory(p)) {
+                dirs++;
+            } else if (Files.exists(p)) {
+                files++;
+                try { totalBytes += Files.size(p); } catch (Exception ignored) {}
+            }
+        }
+        MubTheme.textColored(MubTheme.DIM, files + " file(s), " + dirs + " folder(s) | " + LiskovExplorer.formatSize(totalBytes));
+        ImGui.spacing();
+
+        int shown = 0;
+        for (Path p : win.multiSelection) {
+            if (shown++ >= 10) {
+                MubTheme.textColored(MubTheme.GUTTER, "... and " + (count - 10) + " more");
+                break;
+            }
+            MubTheme.textColored(MubTheme.FG, "  - " + p.getFileName());
+        }
+
+        ImGui.separator();
+        MubWidgets.sectionHeader("BULK ACTIONS");
+        boolean offline = drive.isOffline();
+
+        if (drive.isLocal()) {
+            DriveMount onlineSrv = activeOnlineServer();
+            if (onlineSrv != null && MubWidgets.termButton("COPY ALL -> " + onlineSrv.displayName(), SemanticColor.BOT)) {
+                int ok = 0;
+                for (Path p : List.copyOf(win.multiSelection)) {
+                    try {
+                        LiskovFs.get().drives().transfer(drive, safeRel(drive, p), onlineSrv, "");
+                        ok++;
+                    } catch (Exception ignored) {}
+                }
+                MubWidgets.ToastHost.push("Copied " + ok + " item(s) to " + onlineSrv.displayName(), SemanticColor.BOT);
+            }
+            MubWidgets.tooltip("Copy Selection to Server Drive", "Uploads copies of all selected items to the connected server drive.");
+        } else {
+            if (MubWidgets.termButton("COPY ALL -> LOCAL", SemanticColor.PLAYER)) {
+                int ok = 0;
+                for (Path p : List.copyOf(win.multiSelection)) {
+                    try {
+                        LiskovFs.get().drives().transfer(drive, safeRel(drive, p), LiskovFs.get().drives().local(), "schematics");
+                        ok++;
+                    } catch (Exception ignored) {}
+                }
+                MubWidgets.ToastHost.push("Copied " + ok + " item(s) to LOCAL:/schematics", SemanticColor.PLAYER);
+            }
+            MubWidgets.tooltip("Copy Selection to LOCAL", "Downloads copies of all selected items into LOCAL:/schematics.");
+        }
+
+        if (MubWidgets.termButton("COPY ALL PATHS", SemanticColor.INK_MUTED)) {
+            StringBuilder sb = new StringBuilder();
+            for (Path p : win.multiSelection) {
+                if (!sb.isEmpty()) sb.append('\n');
+                sb.append(p.toAbsolutePath().normalize());
+            }
+            Minecraft mc = Minecraft.getInstance();
+            if (mc != null && mc.keyboardHandler != null) mc.keyboardHandler.setClipboard(sb.toString());
+            MubWidgets.ToastHost.push("Copied " + count + " path(s)", SemanticColor.PLAYER);
+        }
+        MubWidgets.tooltip("Copy All Paths", "Copy every selected full path (one per line) to clipboard.");
+
+        if (!offline && !win.viewingTrash && MubWidgets.termButton("TRASH ALL (Del)", SemanticColor.DANGER)) {
+            int ok = 0;
+            LiskovFs fs = LiskovFs.get();
+            for (Path p : List.copyOf(win.multiSelection)) {
+                try {
+                    trash.moveToTrash(p, fs.fileTypes().detect(p).id());
+                    ok++;
+                } catch (Exception ignored) {}
+            }
+            win.multiSelection.clear();
+            win.selectedPath = null;
+            MubWidgets.ToastHost.push("Moved " + ok + " item(s) to .trash/", SemanticColor.DANGER);
+        }
+        MubWidgets.tooltip("Trash Selected Items", "Move all selected files/folders to .trash/ (recoverable).");
+
+        if (MubWidgets.termButton("CLEAR SELECTION", SemanticColor.INK_MUTED)) {
+            win.multiSelection.clear();
+            win.selectedPath = null;
+            win.selectionAnchor = null;
+        }
     }
 
     private void drawInspectTab(
@@ -167,11 +280,13 @@ final class InspectorPane {
                 if (!offline && MubWidgets.termButton("RESTORE", SemanticColor.WARN)) {
                     doRestore(drive, file, relPath, repoId, vcs, previewCommitId);
                 }
+                MubWidgets.tooltip("Restore Snapshot", "Replace live file with this historical snapshot.");
                 ImGui.sameLine();
                 if (MubWidgets.termButton("LIVE", SemanticColor.INK_MUTED)) {
                     previewCommitId = null;
                     previewCommit = null;
                 }
+                MubWidgets.tooltip("Back to Live", "Stop previewing old snapshot and show live file on disk.");
             }
             try {
                 if (previewCommit != null) {
@@ -206,7 +321,7 @@ final class InspectorPane {
                 editingText = false;
                 try {
                     String txt = Files.readString(file, StandardCharsets.UTF_8);
-                    editorBuf.set(txt.length() > 30000 ? txt.substring(0, 30000) : txt);
+                    editorBuf.set(txt.length() > 60_000 ? txt.substring(0, 60_000) : txt);
                 } catch (Exception e) {
                     editorBuf.set("// Unreadable text file: " + e.getMessage());
                 }
@@ -216,6 +331,7 @@ final class InspectorPane {
                 ImGui.sameLine();
                 if (!editingText) {
                     if (MubWidgets.termButton("QUICK EDIT", SemanticColor.FOCUS)) editingText = true;
+                    MubWidgets.tooltip("Quick Edit", "Edit this text/script file inline and auto-snapshot on save.");
                 } else {
                     if (MubWidgets.termButton("SAVE", SemanticColor.MR)) {
                         try {
@@ -229,6 +345,7 @@ final class InspectorPane {
                             MubWidgets.ToastHost.push("Save failed: " + ex.getMessage(), SemanticColor.DANGER);
                         }
                     }
+                    MubWidgets.tooltip("Save & Snapshot", "Write atomically to disk and record a new .liskov-vcs/ version.");
                     ImGui.sameLine();
                     if (MubWidgets.termButton("CANCEL", SemanticColor.INK_MUTED)) editingText = false;
                 }
@@ -250,6 +367,7 @@ final class InspectorPane {
                     MubWidgets.ToastHost.push(e.getMessage(), SemanticColor.DANGER);
                 }
             }
+            MubWidgets.tooltip("Copy to Server Drive", "Keep local copy intact and copy onto the active server drive.");
         } else {
             if (MubWidgets.termButton("COPY -> LOCAL", SemanticColor.PLAYER)) {
                 try {
@@ -259,14 +377,16 @@ final class InspectorPane {
                     MubWidgets.ToastHost.push(e.getMessage(), SemanticColor.DANGER);
                 }
             }
+            MubWidgets.tooltip("Copy to LOCAL", "Copy this server file into LOCAL:/schematics for offline use.");
             if (!offline) {
                 ImGui.sameLine();
                 boolean pinned = cache == CacheState.PINNED_OFFLINE;
-                if (MubWidgets.termButton(pinned ? "★ KEPT OFFLINE" : "☆ KEEP OFFLINE",
+                if (MubWidgets.termButton(pinned ? "KEPT OFFLINE [x]" : "KEEP OFFLINE",
                         pinned ? SemanticColor.MR : SemanticColor.INK_MUTED)) {
                     drive.setPinnedOffline(relPath, !pinned);
                     try { drive.saveMetadata(); } catch (Exception ignored) {}
                 }
+                MubWidgets.tooltip("Pin Offline", "Always keep a local cached copy when disconnected from this server.");
             }
         }
 
@@ -279,6 +399,7 @@ final class InspectorPane {
                 MubWidgets.ToastHost.push("Snapshot failed: " + e.getMessage(), SemanticColor.DANGER);
             }
         }
+        MubWidgets.tooltip("Create VCS Snapshot", "Save a restore point into hidden .liskov-vcs/ storage.");
 
         for (FileActionRegistry.Action act : FileActionRegistry.actionsFor(ft)) {
             if (MubWidgets.termButton(act.label(), act.tone())) {
@@ -290,19 +411,23 @@ final class InspectorPane {
             LiskovFs.get().copyPathToClipboard(file);
             MubWidgets.ToastHost.push("Copied path to clipboard", SemanticColor.PLAYER);
         }
+        MubWidgets.tooltip("Copy Absolute Path", "Copy full path to clipboard for AI agents or scripts.");
         ImGui.sameLine();
         if (MubWidgets.termButton("EXPLORER", SemanticColor.INK_MUTED)) {
             LiskovFs.get().openInExplorer(file);
         }
-        if (!offline && !win.viewingTrash && MubWidgets.termButton("TRASH", SemanticColor.DANGER)) {
+        MubWidgets.tooltip("Show in OS Explorer", "Reveal this file in your system file manager.");
+        if (!offline && !win.viewingTrash && MubWidgets.termButton("TRASH (Del)", SemanticColor.DANGER)) {
             try {
                 trash.moveToTrash(file, ft.id());
                 win.selectedPath = null;
+                win.multiSelection.remove(file);
                 MubWidgets.ToastHost.push("Moved to .trash/ (recoverable)", SemanticColor.DANGER);
             } catch (Exception e) {
                 MubWidgets.ToastHost.push(e.getMessage(), SemanticColor.DANGER);
             }
         }
+        MubWidgets.tooltip("Move to .trash/", "Soft-delete into recoverable Liskov .trash/ (shortcut: Del).");
     }
 
     private void drawHistoryTab(
@@ -330,11 +455,13 @@ final class InspectorPane {
                     MubWidgets.ToastHost.push(e.getMessage(), SemanticColor.DANGER);
                 }
             }
+            MubWidgets.tooltip("Save Snapshot", "Record a new version with this note in .liskov-vcs/.");
         }
 
         if (MubWidgets.termToggle("br_toggle", "BRANCHES", showBranches, SemanticColor.FOCUS)) {
             showBranches = !showBranches;
         }
+        MubWidgets.tooltip("Show Branches", "Switch or merge optional version branches.");
         if (!offline) {
             ImGui.sameLine();
             if (MubWidgets.termButton("PRUNE >30D", SemanticColor.INK_MUTED)) {
@@ -343,6 +470,7 @@ final class InspectorPane {
                     MubWidgets.ToastHost.push("Pruned " + n + " old autosave(s)", SemanticColor.MR);
                 } catch (Exception ignored) {}
             }
+            MubWidgets.tooltip("Prune Old Autosaves", "Delete non-milestone autosaves older than 30 days (keeps >= 10 latest).");
         }
 
         if (showBranches) {
@@ -350,7 +478,7 @@ final class InspectorPane {
             MubWidgets.sectionHeader("BRANCHES (ON: " + head.activeBranch + ")");
             for (String br : head.branchTips.keySet()) {
                 boolean active = br.equals(head.activeBranch);
-                MubTheme.textColored(active ? MubTheme.PLAYER : MubTheme.DIM, (active ? "● " : "  ") + br);
+                MubTheme.textColored(active ? MubTheme.PLAYER : MubTheme.DIM, (active ? "* " : "  ") + br);
                 if (!offline && !active) {
                     ImGui.sameLine();
                     if (MubWidgets.termButton("SWITCH##sw_" + br, SemanticColor.INK_MUTED)) {
@@ -404,10 +532,11 @@ final class InspectorPane {
             ImGui.sameLine();
             MubTheme.textColored(MubTheme.GUTTER, TIME_FMT.format(Instant.ofEpochMilli(c.timestampMs)));
             ImGui.sameLine();
-            if (MubWidgets.termButton((c.milestone ? "★" : "☆") + "##ms_" + c.commitId,
-                    c.milestone ? SemanticColor.WARN : SemanticColor.INK_MUTED)) {
+            if (MubWidgets.starButton("ms_" + c.commitId, c.milestone, SemanticColor.WARN)) {
                 try { vcs.setMilestone(drive.driveId(), repoId, c.commitId, !c.milestone); } catch (Exception ignored) {}
             }
+            MubWidgets.tooltip(c.milestone ? "Unmark Milestone" : "Mark as Milestone",
+                    "Milestones are never removed by automatic pruning.");
 
             MubTheme.textColored(MubTheme.DIM, "  " + c.message);
             if (ft.previewKind() == LiskovFileType.PreviewKind.SCHEMATIC_3D && file.toString().endsWith(".litematic")) {
@@ -416,6 +545,7 @@ final class InspectorPane {
                     previewCommit = c;
                     activeTab = Tab.INSPECT;
                 }
+                MubWidgets.tooltip("3D Preview Snapshot", "Inspect how this version looked in 3D before restoring.");
                 ImGui.sameLine();
             }
             if (i == 0) {
@@ -461,6 +591,7 @@ final class InspectorPane {
             if (MubWidgets.termButton("LOCK FILE (AUTHOR)", SemanticColor.WARN)) {
                 LiskovSyncClient.get().requestLockToggle("shared", repoId, true, "Locked from Liskov Inspector", "");
             }
+            MubWidgets.tooltip("Lock File", "Prevent teammates from overwriting this file until unlocked.");
         }
     }
 

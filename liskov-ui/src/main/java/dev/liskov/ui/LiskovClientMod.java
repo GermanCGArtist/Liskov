@@ -1,5 +1,6 @@
 package dev.liskov.ui;
 
+import com.mojang.blaze3d.platform.InputConstants;
 import dev.liskov.core.LiskovFs;
 import dev.liskov.core.LiskovMigration;
 import dev.liskov.core.LiskovNamespace;
@@ -17,6 +18,7 @@ import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.input.KeyEvent;
 import net.minecraft.resources.Identifier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,6 +38,13 @@ public final class LiskovClientMod implements ClientModInitializer {
 
     public static ReloadWatcher watcher() {
         return WATCHER;
+    }
+
+    public static boolean matchesExplorerKey(int sdlScancode) {
+        if (openExplorerKey != null) {
+            return openExplorerKey.matches(new KeyEvent(sdlScancode, 0, 0));
+        }
+        return sdlScancode == InputConstants.KEY_F8;
     }
 
     @Override
@@ -70,7 +79,7 @@ public final class LiskovClientMod implements ClientModInitializer {
 
         KeyMapping.Category cat = KeyMapping.Category.register(Identifier.fromNamespaceAndPath("liskov", "main"));
         openExplorerKey = KeyMappingHelper.registerKeyMapping(new KeyMapping(
-                "key.liskov.explorer", 297 /* GLFW_KEY_F8 */, cat));
+                "key.liskov.explorer", InputConstants.KEY_F8, cat));
 
         ClientTickEvents.END_CLIENT_TICK.register(mc -> {
             while (openExplorerKey.consumeClick()) {
@@ -85,13 +94,22 @@ public final class LiskovClientMod implements ClientModInitializer {
                 "liskov.toggle", "Liskov: Toggle File Explorer (F8)", "Lk", SemanticColor.FOCUS,
                 () -> LiskovExplorer.get().toggle()));
         MubWidgets.CommandPalette.register(new MubWidgets.CommandPalette.Entry(
-                "liskov.new_window", "Liskov: Open New Explorer Window (Drag & Drop)", "Lk", SemanticColor.PLAYER,
+                "liskov.new_window", "Liskov: Open New Explorer Window (Ctrl+N)", "Lk", SemanticColor.PLAYER,
                 () -> {
                     LiskovExplorer.get().setOpen(true);
                     LiskovExplorer.get().spawnSecondWindow();
                 }));
         MubWidgets.CommandPalette.register(new MubWidgets.CommandPalette.Entry(
-                "liskov.reload", "Liskov: Force ReloadWatcher Scan Now", "Fs", SemanticColor.MR,
+                "liskov.toggle_menu_card", "Liskov: Toggle Title/Pause Menu Card", "Lk", SemanticColor.INK_MUTED,
+                () -> {
+                    MubTheme.config().showMenuOverview = !MubTheme.config().showMenuOverview;
+                    MubTheme.saveToDisk();
+                    MubWidgets.ToastHost.push(
+                            MubTheme.config().showMenuOverview ? "Menu card visible" : "Menu card hidden",
+                            SemanticColor.FOCUS);
+                }));
+        MubWidgets.CommandPalette.register(new MubWidgets.CommandPalette.Entry(
+                "liskov.reload", "Liskov: Force ReloadWatcher Scan Now (F5)", "Fs", SemanticColor.MR,
                 () -> {
                     WATCHER.reloadNow();
                     MubWidgets.ToastHost.push("ReloadWatcher scan complete", SemanticColor.MR);

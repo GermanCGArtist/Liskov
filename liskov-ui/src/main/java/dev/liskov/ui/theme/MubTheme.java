@@ -60,6 +60,7 @@ public final class MubTheme {
         public float uiScale = 1.0f;
         public boolean titleOverviewOpen = true;
         public boolean pauseOverviewOpen = true;
+        public boolean showMenuOverview = true;
         public String defaultViewMode = "columns";
     }
 
