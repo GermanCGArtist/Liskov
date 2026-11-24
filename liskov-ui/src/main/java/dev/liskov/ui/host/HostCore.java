@@ -187,24 +187,34 @@ public final class HostCore {
         return false;
     }
 
-    public static boolean isDockedViewportActive() {
+    private static float[] activeDockedViewport() {
+        if (disabled) return null;
         float[] vp = lastDockedViewport;
-        return vp != null && vp.length == 4 && vp[2] > 1f && vp[3] > 1f;
+        if (vp == null || vp.length != 4 || vp[2] <= 1f || vp[3] <= 1f) return null;
+        if (visibleLayers().isEmpty()) {
+            lastDockedViewport = null;
+            return null;
+        }
+        return vp;
+    }
+
+    public static boolean isDockedViewportActive() {
+        return activeDockedViewport() != null;
     }
 
     public static double remapMouseX(double screenX) {
-        float[] vp = lastDockedViewport;
+        float[] vp = activeDockedViewport();
         Minecraft mc = Minecraft.getInstance();
-        if (vp == null || vp.length != 4 || vp[2] <= 1f || mc == null || mc.getWindow() == null) return screenX;
+        if (vp == null || mc == null || mc.getWindow() == null) return screenX;
         double sw = Math.max(1, mc.getWindow().getScreenWidth());
         double norm = Math.max(0.0, Math.min(1.0, (screenX - vp[0]) / vp[2]));
         return norm * sw;
     }
 
     public static double remapMouseY(double screenY) {
-        float[] vp = lastDockedViewport;
+        float[] vp = activeDockedViewport();
         Minecraft mc = Minecraft.getInstance();
-        if (vp == null || vp.length != 4 || vp[3] <= 1f || mc == null || mc.getWindow() == null) return screenY;
+        if (vp == null || mc == null || mc.getWindow() == null) return screenY;
         double sh = Math.max(1, mc.getWindow().getScreenHeight());
         double norm = Math.max(0.0, Math.min(1.0, (screenY - vp[1]) / vp[3]));
         return norm * sh;
@@ -221,17 +231,33 @@ public final class HostCore {
     }
 
     public static void renderFrame() {
-        if (disabled || LAYERS.isEmpty()) return;
+        if (disabled || LAYERS.isEmpty()) {
+            lastDockedViewport = null;
+            return;
+        }
         Minecraft mc = Minecraft.getInstance();
-        if (mc == null) return;
+        if (mc == null) {
+            lastDockedViewport = null;
+            return;
+        }
         Window win = mc.getWindow();
-        if (win == null || win.isIconified() || win.getWidth() <= 0 || win.getHeight() <= 0) return;
+        if (win == null || win.isIconified() || win.getWidth() <= 0 || win.getHeight() <= 0) {
+            lastDockedViewport = null;
+            return;
+        }
         List<UiLayer> layers = visibleLayers();
-        if (layers.isEmpty()) return;
+        if (layers.isEmpty()) {
+            lastDockedViewport = null;
+            return;
+        }
         try {
-            if (!initialized && !init()) return;
+            if (!initialized && !init()) {
+                lastDockedViewport = null;
+                return;
+            }
             render(mc, layers);
         } catch (Throwable t) {
+            lastDockedViewport = null;
             disabled = true;
             LOG.warn("[Liskov] ImGui host disabled after an error", t);
         }
