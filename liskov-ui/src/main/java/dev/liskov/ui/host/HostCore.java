@@ -498,7 +498,9 @@ public final class HostCore {
         }
         ImGui.setCurrentContext(ctx);
         if (wants || action == InputMap.GLFW_RELEASE) {
-            ImGui.getIO().addMouseButtonEvent(button, action == InputMap.GLFW_PRESS);
+            if (button >= 0 && button < 5) {
+                ImGui.getIO().addMouseButtonEvent(button, action == InputMap.GLFW_PRESS);
+            }
             for (UiLayer l : visibleLayers()) {
                 try {
                     if (action == InputMap.GLFW_RELEASE || l.wantsMouse()) l.onMouseButton(button, action, mods);
