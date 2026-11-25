@@ -31,9 +31,11 @@ import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -47,6 +49,7 @@ public final class LiskovNetMod implements ModInitializer {
 
     private volatile LiskovServerStore serverStore;
     private final Map<String, ChunkBuffer> pendingUploads = new ConcurrentHashMap<>();
+    private final Map<String, ChunkBuffer> pendingJsonChunks = new ConcurrentHashMap<>();
 
     private static final class ChunkBuffer {
         final String sha256;
@@ -102,6 +105,7 @@ public final class LiskovNetMod implements ModInitializer {
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
             serverStore = null;
             pendingUploads.clear();
+            pendingJsonChunks.clear();
         });
 
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
@@ -156,6 +160,20 @@ public final class LiskovNetMod implements ModInitializer {
                         acceptAndBroadcast(server, player, store, uuid, name, isOp, req);
                     }
                 }
+                case SyncWire.JSON_CHUNK -> {
+                    SyncWire.JsonChunkMeta meta = GSON.fromJson(body, SyncWire.JsonChunkMeta.class);
+                    if (meta == null || meta.transferId == null) return;
+                    String key = uuid + ":" + meta.transferId;
+                    ChunkBuffer buf = pendingJsonChunks.computeIfAbsent(key, k -> new ChunkBuffer(meta.transferId, meta.totalChunks));
+                    byte[] complete = buf.accept(meta.chunkIndex, payload.data());
+                    if (complete != null) {
+                        pendingJsonChunks.remove(key);
+                        byte[] jsonBytes = meta.compressed
+                                ? SyncWire.gunzip(complete, SyncWire.MAX_DECOMPRESSED_BYTES)
+                                : complete;
+                        handleC2S(server, player, new LiskovPayload(new String(jsonBytes, StandardCharsets.UTF_8)));
+                    }
+                }
                 case SyncWire.BLOB_CHUNK -> {
                     SyncWire.BlobChunkMeta meta = GSON.fromJson(body, SyncWire.BlobChunkMeta.class);
                     String key = uuid + ":" + meta.transferId + ":" + meta.sha256;
@@ -163,7 +181,10 @@ public final class LiskovNetMod implements ModInitializer {
                     byte[] complete = buf.accept(meta.chunkIndex, payload.data());
                     if (complete != null) {
                         pendingUploads.remove(key);
-                        store.storeBlob(meta.sha256, complete);
+                        byte[] raw = meta.compressed
+                                ? SyncWire.gunzip(complete, SyncWire.MAX_DECOMPRESSED_BYTES)
+                                : complete;
+                        store.storeBlob(meta.sha256, raw);
                     }
                 }
                 case SyncWire.PUSH_COMMIT -> {
@@ -295,23 +316,65 @@ public final class LiskovNetMod implements ModInitializer {
     }
 
     private void sendBlobInChunks(ServerPlayer player, String transferId, String sha256, byte[] raw) {
-        int total = Math.max(1, (raw.length + SyncWire.CHUNK_SIZE - 1) / SyncWire.CHUNK_SIZE);
+        byte[] wireBytes = raw;
+        boolean compressed = false;
+        try {
+            SyncWire.CompressedPayload cp = SyncWire.compressIfSmaller(raw);
+            wireBytes = cp.bytes();
+            compressed = cp.compressed();
+        } catch (IOException e) {
+            LOG.warn("[Liskov] Blob compression failed for {}, sending raw", sha256, e);
+        }
+        List<byte[]> slices = SyncWire.splitChunks(wireBytes, SyncWire.CHUNK_SIZE);
+        int total = slices.size();
         for (int i = 0; i < total; i++) {
-            int start = i * SyncWire.CHUNK_SIZE;
-            int end = Math.min(raw.length, start + SyncWire.CHUNK_SIZE);
-            byte[] slice = new byte[end - start];
-            System.arraycopy(raw, start, slice, 0, slice.length);
             SyncWire.BlobChunkMeta meta = new SyncWire.BlobChunkMeta();
             meta.transferId = transferId;
             meta.sha256 = sha256;
             meta.chunkIndex = i;
             meta.totalChunks = total;
-            meta.totalBytes = raw.length;
-            send(player, SyncWire.BLOB_CHUNK, GSON.toJsonTree(meta), slice);
+            meta.totalBytes = wireBytes.length;
+            meta.compressed = compressed;
+            sendRaw(player, SyncWire.BLOB_CHUNK, GSON.toJsonTree(meta), slices.get(i));
         }
     }
 
     private void send(ServerPlayer player, String type, JsonElement body, byte[] data) {
+        if (!ServerPlayNetworking.canSend(player, LiskovPayload.TYPE)) return;
+        JsonObject env = new JsonObject();
+        env.addProperty("v", SyncWire.PROTOCOL_VERSION);
+        env.addProperty("type", type);
+        env.add("body", body == null ? new JsonObject() : body);
+        String jsonStr = GSON.toJson(env);
+        byte[] jsonBytes = jsonStr.getBytes(StandardCharsets.UTF_8);
+        if ((data == null || data.length == 0) && jsonBytes.length > SyncWire.MAX_SINGLE_JSON_BYTES) {
+            byte[] wireBytes = jsonBytes;
+            boolean compressed = false;
+            try {
+                SyncWire.CompressedPayload cp = SyncWire.compressIfSmaller(jsonBytes);
+                wireBytes = cp.bytes();
+                compressed = cp.compressed();
+            } catch (IOException e) {
+                LOG.warn("[Liskov] JSON envelope compression failed for {}, sending raw chunks", type, e);
+            }
+            List<byte[]> slices = SyncWire.splitChunks(wireBytes, SyncWire.CHUNK_SIZE);
+            String transferId = "js-" + UUID.randomUUID().toString().substring(0, 8);
+            int total = slices.size();
+            for (int i = 0; i < total; i++) {
+                SyncWire.JsonChunkMeta meta = new SyncWire.JsonChunkMeta();
+                meta.transferId = transferId;
+                meta.chunkIndex = i;
+                meta.totalChunks = total;
+                meta.totalBytes = wireBytes.length;
+                meta.compressed = compressed;
+                sendRaw(player, SyncWire.JSON_CHUNK, GSON.toJsonTree(meta), slices.get(i));
+            }
+            return;
+        }
+        ServerPlayNetworking.send(player, new LiskovPayload(jsonStr, data));
+    }
+
+    private void sendRaw(ServerPlayer player, String type, JsonElement body, byte[] data) {
         if (!ServerPlayNetworking.canSend(player, LiskovPayload.TYPE)) return;
         JsonObject env = new JsonObject();
         env.addProperty("v", SyncWire.PROTOCOL_VERSION);

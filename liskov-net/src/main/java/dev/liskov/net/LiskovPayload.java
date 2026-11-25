@@ -8,7 +8,7 @@ import net.minecraft.resources.Identifier;
 
 /**
  * Native Fabric {@link CustomPacketPayload} on {@code liskov:sync} carrying JSON control envelopes
- * and optional binary 64 KB blob chunks.
+ * and optional compressed 24 KB binary chunks (safely below Minecraft's 32 KB C2S payload cap).
  */
 public record LiskovPayload(String json, byte[] data) implements CustomPacketPayload {
     public static final Identifier CHANNEL_ID =

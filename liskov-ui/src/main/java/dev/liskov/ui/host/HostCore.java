@@ -419,6 +419,11 @@ public final class HostCore {
         if (disabled || mc == null || mc.getWindow() == null || window != mc.getWindow().handle()) return false;
         int key = InputMap.glfwKey(sdlScancode), action = InputMap.glfwAction(mcAction), mods = InputMap.glfwMods(sdlMods);
 
+        // Always let standard Minecraft/OS function shortcuts pass through (F11 fullscreen, F2 screenshot, F3 debug)
+        if (key == 300 /* GLFW_KEY_F11 */ || key == 291 /* GLFW_KEY_F2 */) {
+            return false;
+        }
+
         if (LiskovExplorer.get().handleGlobalKey(key, sdlScancode, action, mods)) {
             return true;
         }
