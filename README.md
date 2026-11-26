@@ -17,7 +17,7 @@ Liskov is structured as a three-module Gradle build packaged into a single unive
 - **Fabric API:** Latest for `26.3`
 - **Java:** `25+`
 
-Drop `liskov-0.2.3+mc26.3.jar` into the `mods/` directory on your Fabric client and/or server.
+Drop `liskov-0.2.4+mc26.3.jar` into the `mods/` directory on your Fabric client and/or server.
 
 ## Mod Suite
 
@@ -29,7 +29,7 @@ Liskov is the shared foundation (Drives filesystem, `.liskov-vcs/` version contr
 | **[Manhattan](https://github.com/GermanCGArtist/Manhattan)** | Automation scripting, Midtown path engine, docked workspace & multi-bot fleet client | `J` Workspace · `K` Capture · `Ctrl+Shift+P` Script Palette |
 | **[Manhattan Fleet Server](https://github.com/GermanCGArtist/manhattan-fleet-server)** | Server-side multi-bot fleet coordinator for Manhattan | `/fleet` server commands |
 | **[Vitruvius](https://github.com/GermanCGArtist/Vitruvius)** | Blender-style 3D schematic scene editor, projects, assemblies, arrays & shape generator | `F6` 3D Editor |
-| **Neurath** | Octilinear/geographic transit network planner, JourneyMap vector overlay & Spectate mode | `N` Transit Diagram · `V` Spectate |
+| **[Neurath](https://github.com/GermanCGArtist/Neurath)** | Octilinear/geographic transit network planner, JourneyMap vector overlay & Spectate mode | `N` Transit Diagram · `V` Spectate |
 
 ## Quick Start & Controls
 
