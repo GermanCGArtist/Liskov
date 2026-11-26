@@ -76,6 +76,16 @@ public final class MenuOverviewRegistry implements UiLayer {
     }
 
     @Override
+    public boolean wantsKeyboard() {
+        return false;
+    }
+
+    @Override
+    public boolean wantsKey(int key, int scancode, int action, int mods) {
+        return false;
+    }
+
+    @Override
     public void draw() {
         Surface surface = activeSurface();
         if (surface == null || !MubTheme.config().showMenuOverview) return;

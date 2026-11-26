@@ -29,6 +29,7 @@ public final class FilePickerModal {
     private static Consumer<Path> callback;
     private static final ImString SEARCH = new ImString(128);
     private static Path selected;
+    private static boolean focusSearch;
     private static final SchematicPreview3D PREVIEW = new SchematicPreview3D();
 
     private FilePickerModal() {}
@@ -38,6 +39,7 @@ public final class FilePickerModal {
         callback = onPick;
         SEARCH.set("");
         selected = null;
+        focusSearch = true;
     }
 
     public static boolean isOpen() {
@@ -45,8 +47,12 @@ public final class FilePickerModal {
     }
 
     public static void close() {
+        boolean wasOpen = activeRequest != null;
         activeRequest = null;
         callback = null;
+        if (wasOpen) {
+            dev.liskov.ui.host.LiskovUiHost.regrabMouseIfFree();
+        }
     }
 
     public static void draw() {
@@ -55,14 +61,29 @@ public final class FilePickerModal {
         ImGui.setNextWindowPos(vp.getPosX() + (vp.getSizeX() - 780f) * 0.5f, vp.getPosY() + (vp.getSizeY() - 480f) * 0.5f);
         ImGui.setNextWindowSize(780f, 480f);
         if (ImGui.begin(activeRequest.title() + "###LiskovPicker", ImGuiWindowFlags.NoCollapse)) {
-            ImGui.inputTextWithHint("##pick_q", "Filter files...", SEARCH);
+            if (focusSearch) {
+                ImGui.setKeyboardFocusHere();
+                focusSearch = false;
+            }
+            ImGui.inputTextWithHint("##pick_q", "Filter files... (Up/Down, Enter to select, Esc to cancel)", SEARCH);
             ImGui.separator();
 
+            LiskovFs fs = LiskovFs.get();
+            Path root = activeRequest.initialDir() != null ? activeRequest.initialDir() : fs.schematicsDir();
+            List<Path> files = listMatching(root, fs, activeRequest.allowedTypeIds(), SEARCH.get().trim().toLowerCase());
+
+            if (!files.isEmpty()) {
+                int idx = selected == null ? -1 : files.indexOf(selected);
+                if (ImGui.isKeyPressed(imgui.flag.ImGuiKey.DownArrow)) {
+                    selectPath(files.get((idx + 1) % files.size()), fs);
+                } else if (ImGui.isKeyPressed(imgui.flag.ImGuiKey.UpArrow)) {
+                    selectPath(files.get((idx <= 0 ? files.size() - 1 : idx - 1)), fs);
+                }
+            }
+
+            boolean confirm = false;
             float availH = ImGui.getContentRegionAvailY() - 36f;
             if (ImGui.beginChild("##pick_list", 440f, availH, true)) {
-                LiskovFs fs = LiskovFs.get();
-                Path root = activeRequest.initialDir() != null ? activeRequest.initialDir() : fs.schematicsDir();
-                List<Path> files = listMatching(root, fs, activeRequest.allowedTypeIds(), SEARCH.get().trim().toLowerCase());
                 for (Path p : files) {
                     LiskovFileType ft = fs.fileTypes().detect(p);
                     MubWidgets.fileTypeBadge(ft, false);
@@ -70,13 +91,11 @@ public final class FilePickerModal {
                     String rel = root.relativize(p).toString().replace('\\', '/');
                     boolean isSel = p.equals(selected);
                     if (ImGui.selectable(rel + "##p_" + rel, isSel)) {
-                        selected = p;
-                        if (ft.previewKind() == LiskovFileType.PreviewKind.SCHEMATIC_3D && p.toString().endsWith(".litematic")) {
-                            try {
-                                PREVIEW.setSummary(p.toString(), LitematicReader.read(p));
-                            } catch (Exception ignored) {
-                            }
-                        }
+                        selectPath(p, fs);
+                    }
+                    if (ImGui.isItemHovered() && ImGui.isMouseDoubleClicked(0)) {
+                        selectPath(p, fs);
+                        confirm = true;
                     }
                 }
             }
@@ -94,12 +113,16 @@ public final class FilePickerModal {
             }
             ImGui.endChild();
 
+            if (selected != null && (ImGui.isKeyPressed(imgui.flag.ImGuiKey.Enter) || ImGui.isKeyPressed(imgui.flag.ImGuiKey.KeypadEnter))) {
+                confirm = true;
+            }
+
             ImGui.separator();
             if (MubWidgets.termButton("CANCEL", SemanticColor.INK_MUTED)) {
                 close();
             }
             ImGui.sameLine();
-            if (selected != null && MubWidgets.termButton("SELECT FILE", SemanticColor.CTA)) {
+            if (selected != null && (MubWidgets.termButton("SELECT FILE", SemanticColor.CTA) || confirm)) {
                 Path picked = selected;
                 Consumer<Path> cb = callback;
                 close();
@@ -107,6 +130,17 @@ public final class FilePickerModal {
             }
         }
         ImGui.end();
+    }
+
+    private static void selectPath(Path p, LiskovFs fs) {
+        selected = p;
+        LiskovFileType ft = fs.fileTypes().detect(p);
+        if (ft.previewKind() == LiskovFileType.PreviewKind.SCHEMATIC_3D && p.toString().endsWith(".litematic")) {
+            try {
+                PREVIEW.setSummary(p.toString(), LitematicReader.read(p));
+            } catch (Exception ignored) {
+            }
+        }
     }
 
     private static List<Path> listMatching(Path root, LiskovFs fs, Set<String> allowedIds, String query) {

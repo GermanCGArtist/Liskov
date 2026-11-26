@@ -30,6 +30,7 @@ public final class LiskovUiHost {
     public static double cursorX() { return HostCore.cursorX(); }
     public static double cursorY() { return HostCore.cursorY(); }
     public static boolean blocksMouseGrab() { return HostCore.blocksMouseGrab(); }
+    public static void regrabMouseIfFree() { HostCore.regrabMouseIfFree(); }
     public static boolean isDockedViewportActive() { return HostCore.isDockedViewportActive(); }
     public static double remapMouseX(double x) { return HostCore.remapMouseX(x); }
     public static double remapMouseY(double y) { return HostCore.remapMouseY(y); }

@@ -17,26 +17,41 @@ Liskov is structured as a three-module Gradle build packaged into a single unive
 - **Fabric API:** Latest for `26.3`
 - **Java:** `25+`
 
-Drop `liskov-0.1.0+mc26.3.jar` into the `mods/` directory on your Fabric client and/or server.
+Drop `liskov-0.2.3+mc26.3.jar` into the `mods/` directory on your Fabric client and/or server.
+
+## Mod Suite
+
+Liskov is the shared foundation (Drives filesystem, `.liskov-vcs/` version control, compressed/chunked `liskov:sync` networking, and single-context Dear ImGui host) for the Minecraft 26.3 mod suite:
+
+| Mod | Role | Default Keybinds |
+|---|---|---|
+| **[Liskov](https://github.com/GermanCGArtist/Liskov)** | Shared ImGui UI host, Drives filesystem, File Explorer, Command Palette, VCS & server sync | `F8` Explorer · `Ctrl+P` Command Palette |
+| **[Manhattan](https://github.com/GermanCGArtist/Manhattan)** | Automation scripting, Midtown path engine, docked workspace & multi-bot fleet client | `J` Workspace · `K` Capture · `Ctrl+Shift+P` Script Palette |
+| **[Manhattan Fleet Server](https://github.com/GermanCGArtist/manhattan-fleet-server)** | Server-side multi-bot fleet coordinator for Manhattan | `/fleet` server commands |
+| **[Vitruvius](https://github.com/GermanCGArtist/Vitruvius)** | Blender-style 3D schematic scene editor, projects, assemblies, arrays & shape generator | `F6` 3D Editor |
+| **Neurath** | Octilinear/geographic transit network planner, JourneyMap vector overlay & Spectate mode | `N` Transit Diagram · `V` Spectate |
 
 ## Quick Start & Controls
 
-- **`F8`**: Open / toggle the Liskov Explorer window
-- **`Ctrl+P`**: Open the Liskov Command Palette
+- **`F8`**: Open / toggle the Liskov File Explorer (works from gameplay, Title/Pause screens, and mod UIs)
+- **`Ctrl+P`**: Open the unified Liskov Command Palette (`Up`/`Down` to navigate, `Enter` to run, `Esc` to close)
+- **Explorer Shortcuts**: `Ctrl+F` search · `Ctrl+N` new window · `Ctrl+Shift+N` new folder · `Ctrl+W` close window · `Ctrl+A`/`C`/`X`/`V` select/copy/cut/paste · `F2` rename · `F5`/`Ctrl+R` reload · `Ctrl+1/2/3` Columns/List/Grid · `Delete` trash · `Esc` close
+- **File Picker**: `Up`/`Down` navigate · `Enter` or double-click to select · `Esc` cancel
+- **Pass-through**: `F11` (fullscreen), `F1` (HUD), `F3` (debug), and vanilla screens (`ChatScreen`, `PauseScreen`, inventories) always interoperate cleanly, and closing overlays automatically re-grabs the mouse when returning to gameplay
 - **`/liskov`** (server / OP commands): `status`, `share`, `acl`, `lock`, `unlock`, `history`, `revert`
 
 ## Building from Source
 
-- **Windows:** `build.bat test build` (automatically locates JDK 25 and sets a short `jdk.net.unixdomain.tmpdir`)
-- **Linux / macOS (JDK 25):** `./gradlew test build`
+- **Windows:** `build.bat test build publishToMavenLocal` (automatically locates JDK 25 and sets a short `jdk.net.unixdomain.tmpdir`)
+- **Linux / macOS (JDK 25):** `./gradlew test build publishToMavenLocal`
 
-Output universal mod JAR: `liskov-ui/build/libs/liskov-<version>.jar`
+Output universal mod JAR: `liskov-ui/build/libs/liskov-<version>+mc26.3.jar`
 
 ## Documentation
 
-- [Documentation Hub](file:///f:/workflow/Liskov/docs/README.md) — Reading order and overview for mod authors and contributors
-- [System Architecture](file:///f:/workflow/Liskov/docs/ARCHITECTURE.md) — 3-module split, Jar-in-Jar packaging, Drives filesystem, `.liskov-vcs/`, `liskov:sync`, ACLs, and `LiskovUiHost`
-- [API Reference](file:///f:/workflow/Liskov/docs/API_REFERENCE.md) — Verified class-by-class reference for `:liskov-core`, `:liskov-net`, and `:liskov-ui`
-- [Migrating Vitruvius](file:///f:/workflow/Liskov/docs/MIGRATING_VITRUVIUS.md) — File-by-file transition guide for Vitruvius (`cg-uihost`, project/schematic I/O, sync, registries)
-- [Migrating Manhattan](file:///f:/workflow/Liskov/docs/MIGRATING_MANHATTAN.md) — File-by-file transition guide for Manhattan (ImGui host, `MubTheme`/`MubWidgets`, storage migration, fleet/sync)
-- [Gaps & Follow-ups](file:///f:/workflow/Liskov/docs/GAPS_AND_FOLLOWUPS.md) — Prioritized (`P0`/`P1`/`P2`) audit of missing hooks and `v0.1.1` follow-up items
+- [Documentation Hub](docs/README.md) — Reading order and overview for mod authors and contributors
+- [System Architecture](docs/ARCHITECTURE.md) — 3-module split, Jar-in-Jar packaging, Drives filesystem, `.liskov-vcs/`, `liskov:sync`, ACLs, and `LiskovUiHost`
+- [API Reference](docs/API_REFERENCE.md) — Verified class-by-class reference for `:liskov-core`, `:liskov-net`, and `:liskov-ui`
+- [Migrating Vitruvius](docs/MIGRATING_VITRUVIUS.md) — File-by-file transition guide for Vitruvius (`cg-uihost`, project/schematic I/O, sync, registries)
+- [Migrating Manhattan](docs/MIGRATING_MANHATTAN.md) — File-by-file transition guide for Manhattan (ImGui host, `MubTheme`/`MubWidgets`, storage migration, fleet/sync)
+- [Gaps & Follow-ups](docs/GAPS_AND_FOLLOWUPS.md) — Prioritized (`P0`/`P1`/`P2`) audit of missing hooks and follow-up items

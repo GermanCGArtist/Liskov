@@ -149,6 +149,8 @@ public final class LiskovExplorer implements UiLayer {
         Minecraft mc = Minecraft.getInstance();
         if (open && mc != null && mc.mouseHandler != null && mc.mouseHandler.isMouseGrabbed()) {
             mc.mouseHandler.releaseMouse();
+        } else if (!open) {
+            LiskovUiHost.regrabMouseIfFree();
         }
     }
 
@@ -200,17 +202,21 @@ public final class LiskovExplorer implements UiLayer {
         if (action != InputMap.GLFW_PRESS) return false;
         boolean ctrl = (mods & (InputMap.GLFW_MOD_CONTROL | InputMap.GLFW_MOD_SUPER)) != 0;
         if (ctrl && key == 80 /* P */) {
-            MubWidgets.CommandPalette.toggle();
-            Minecraft mc = Minecraft.getInstance();
-            if (MubWidgets.CommandPalette.isOpen() && mc != null && mc.mouseHandler != null && mc.mouseHandler.isMouseGrabbed()) {
-                mc.mouseHandler.releaseMouse();
+            boolean shift = (mods & InputMap.GLFW_MOD_SHIFT) != 0;
+            if (!shift) {
+                MubWidgets.CommandPalette.toggle();
+                Minecraft mc = Minecraft.getInstance();
+                if (MubWidgets.CommandPalette.isOpen() && mc != null && mc.mouseHandler != null && mc.mouseHandler.isMouseGrabbed()) {
+                    mc.mouseHandler.releaseMouse();
+                }
+                return true;
             }
-            return true;
         }
         if (LiskovClientMod.matchesExplorerKey(scancode) && !LiskovUiHost.imguiWantsTextInput()) {
             Minecraft mc = Minecraft.getInstance();
-            boolean menuContext = mc != null && (mc.gui.screen() instanceof TitleScreen || mc.gui.screen() instanceof PauseScreen);
-            if (open || menuContext) {
+            var scr = mc != null && mc.gui != null ? mc.gui.screen() : null;
+            boolean menuOrWorld = scr == null || scr instanceof TitleScreen || scr instanceof PauseScreen;
+            if (open || menuOrWorld) {
                 toggle();
                 return true;
             }
@@ -233,6 +239,11 @@ public final class LiskovExplorer implements UiLayer {
 
     @Override
     public boolean wantsKey(int key, int scancode, int action, int mods) {
+        if (!visible()) return false;
+        // Always let Minecraft's HUD toggle (F1), Debug screen (F3), and Fullscreen (F11) pass through
+        if (key == 290 /* F1 */ || key == 292 /* F3 */ || key == 300 /* F11 */) {
+            return false;
+        }
         return open || FilePickerModal.isOpen() || MubWidgets.CommandPalette.isOpen() || LiskovUiHost.imguiWantsKeyboard();
     }
 

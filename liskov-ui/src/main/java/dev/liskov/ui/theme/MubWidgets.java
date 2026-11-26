@@ -258,6 +258,7 @@ public final class MubWidgets {
         private static final ImString QUERY = new ImString(128);
         private static boolean open = false;
         private static boolean focusInput = false;
+        private static int selectedIndex = 0;
 
         private CommandPalette() {}
 
@@ -274,10 +275,19 @@ public final class MubWidgets {
             if (open) {
                 QUERY.set("");
                 focusInput = true;
+                selectedIndex = 0;
+            } else {
+                dev.liskov.ui.host.LiskovUiHost.regrabMouseIfFree();
             }
         }
 
-        public static void close() { open = false; }
+        public static void close() {
+            boolean wasOpen = open;
+            open = false;
+            if (wasOpen) {
+                dev.liskov.ui.host.LiskovUiHost.regrabMouseIfFree();
+            }
+        }
 
         public static void draw() {
             if (!open) return;
@@ -287,7 +297,7 @@ public final class MubWidgets {
             int flags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove;
             if (ImGui.begin("##LiskovCmdPalette", flags)) {
                 if (ImGui.isKeyPressed(ImGuiKey.Escape)) {
-                    open = false;
+                    close();
                 }
                 MubTheme.textColored(MubTheme.ACCENT, ">");
                 ImGui.sameLine();
@@ -296,28 +306,72 @@ public final class MubWidgets {
                     focusInput = false;
                 }
                 ImGui.setNextItemWidth(-44f);
-                ImGui.inputTextWithHint("##cmd_q", "Search Liskov / Mod commands...", QUERY);
+                ImGui.inputTextWithHint("##cmd_q", "Search Liskov / Mod commands... (Up/Down, Enter)", QUERY);
                 ImGui.sameLine();
-                if (termButton("ESC", SemanticColor.INK_MUTED)) open = false;
+                if (termButton("ESC", SemanticColor.INK_MUTED)) close();
                 ImGui.separator();
 
                 String q = QUERY.get().trim().toLowerCase(Locale.ROOT);
+                String[] terms = q.isEmpty() ? new String[0] : q.split("\\s+");
                 List<Entry> snapshot;
                 synchronized (CommandPalette.class) {
                     snapshot = List.copyOf(ENTRIES);
                 }
+                List<Entry> filtered = new ArrayList<>();
+                for (Entry e : snapshot) {
+                    String hay = (e.badge + " " + e.label).toLowerCase(Locale.ROOT);
+                    boolean match = true;
+                    for (String t : terms) {
+                        if (!t.isEmpty() && !hay.contains(t)) {
+                            match = false;
+                            break;
+                        }
+                    }
+                    if (match) filtered.add(e);
+                }
+
+                if (!filtered.isEmpty()) {
+                    if (ImGui.isKeyPressed(ImGuiKey.DownArrow)) {
+                        selectedIndex = (selectedIndex + 1) % filtered.size();
+                    }
+                    if (ImGui.isKeyPressed(ImGuiKey.UpArrow)) {
+                        selectedIndex = (selectedIndex - 1 + filtered.size()) % filtered.size();
+                    }
+                    if (selectedIndex >= filtered.size()) selectedIndex = 0;
+                } else {
+                    selectedIndex = 0;
+                }
+
+                boolean enterPressed = ImGui.isKeyPressed(ImGuiKey.Enter) || ImGui.isKeyPressed(ImGuiKey.KeypadEnter);
+                Entry chosen = null;
+
                 if (ImGui.beginChild("##cmd_hits", 0f, 0f, false)) {
-                    for (Entry e : snapshot) {
-                        if (!q.isEmpty() && !e.label.toLowerCase(Locale.ROOT).contains(q)) continue;
+                    for (int i = 0; i < filtered.size(); i++) {
+                        Entry e = filtered.get(i);
+                        boolean sel = (i == selectedIndex);
                         termBadge(e.badge, e.role);
                         ImGui.sameLine();
-                        if (ImGui.selectable(e.label + "##cmd_" + e.id)) {
-                            open = false;
-                            if (e.action != null) e.action.run();
+                        if (ImGui.selectable(e.label + "##cmd_" + e.id, sel)) {
+                            chosen = e;
                         }
+                        if (sel && (ImGui.isKeyPressed(ImGuiKey.DownArrow) || ImGui.isKeyPressed(ImGuiKey.UpArrow))) {
+                            ImGui.setScrollHereY();
+                        }
+                    }
+                    if (filtered.isEmpty()) {
+                        MubTheme.textColored(MubTheme.GUTTER, "No matching commands.");
                     }
                 }
                 ImGui.endChild();
+
+                if (chosen == null && enterPressed && !filtered.isEmpty()) {
+                    chosen = filtered.get(selectedIndex);
+                }
+                if (chosen != null) {
+                    open = false;
+                    if (chosen.action != null) chosen.action.run();
+                    dev.liskov.ui.host.LiskovUiHost.regrabMouseIfFree();
+                }
             }
             ImGui.end();
         }

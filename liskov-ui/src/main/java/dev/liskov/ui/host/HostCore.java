@@ -187,6 +187,18 @@ public final class HostCore {
         return false;
     }
 
+    /**
+     * Re-grabs the Minecraft mouse cursor when returning to gameplay if no visible Liskov layer
+     * still blocks mouse grab and no Minecraft screen is open.
+     */
+    public static void regrabMouseIfFree() {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc == null || mc.level == null || mc.gui == null || mc.gui.screen() != null) return;
+        if (!blocksMouseGrab() && mc.mouseHandler != null && !mc.mouseHandler.isMouseGrabbed()) {
+            mc.mouseHandler.grabMouse();
+        }
+    }
+
     private static float[] activeDockedViewport() {
         if (disabled) return null;
         float[] vp = lastDockedViewport;
@@ -419,8 +431,8 @@ public final class HostCore {
         if (disabled || mc == null || mc.getWindow() == null || window != mc.getWindow().handle()) return false;
         int key = InputMap.glfwKey(sdlScancode), action = InputMap.glfwAction(mcAction), mods = InputMap.glfwMods(sdlMods);
 
-        // Always let standard Minecraft/OS function shortcuts pass through (F11 fullscreen, F2 screenshot, F3 debug)
-        if (key == 300 /* GLFW_KEY_F11 */ || key == 291 /* GLFW_KEY_F2 */) {
+        // Always let fullscreen toggle (F11) pass through to Minecraft/OS
+        if (key == 300 /* GLFW_KEY_F11 */) {
             return false;
         }
 
